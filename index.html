@@ -1,0 +1,1385 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gerenciador de Plano de Corte Profissional</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Configuração de Fonte Padrão */
+        :root {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Estilos customizados para as barras de visualização */
+        .cut-bar {
+            height: 24px; 
+            display: flex;
+            align-items: center;
+            position: relative;
+            border-radius: 6px;
+            overflow: hidden;
+            margin-bottom: 12px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.4);
+        }
+        .piece-segment {
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px; /* Reduzido para 10px */
+            color: #1f2937;
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            padding: 0 3px; /* Ajustado padding */
+            box-sizing: border-box;
+            border-right: 1px dashed rgba(0, 0, 0, 0.3);
+            cursor: pointer; /* Cursor de clique para indicar interatividade */
+            transition: all 0.3s ease-out; /* Transição para o destaque */
+        }
+        /* Classe para destacar peças idênticas */
+        .piece-segment.highlighted {
+            filter: brightness(1.1);
+            transform: scale(1.05);
+            /* Sombra/Borda para destaque (cor secundária: esmeralda) */
+            box-shadow: 0 0 10px rgba(52, 211, 153, 0.8), 0 0 0 4px #34d399; 
+            position: relative;
+            z-index: 10;
+            opacity: 1 !important;
+        }
+        .waste-segment {
+            height: 100%;
+            background-color: #44403c; /* Stone-700 for neutral waste */
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px; /* Reduzido para 10px */
+            color: #d6d3d1;
+            font-weight: 500;
+        }
+        .kerf-segment {
+            height: 100%;
+            background-color: #3f3f46; /* Zinc-700 */
+            transition: all 0.2s ease;
+        }
+        .dark-input {
+            background-color: #374151; /* Gray-700 */
+            border-color: #4b5563; /* Gray-600 */
+            color: #f3f4f6; /* Gray-100 */
+        }
+        /* Transição para o acordeão */
+        .collapsible-content {
+            transition: max-height 0.3s ease-out, padding 0.3s ease-out;
+            max-height: 0;
+            overflow: hidden;
+        }
+        .collapsible-content.expanded {
+            max-height: 1000px;
+            padding-top: 1.5rem; 
+            padding-bottom: 1.5rem; 
+        }
+        .collapsible-header.expanded svg {
+             transform: rotate(180deg);
+        }
+        .collapsible-header.expanded {
+            border-bottom-left-radius: 0;
+            border-bottom-right-radius: 0;
+        }
+    </style>
+    <script>
+        // Configuração do Tailwind para usar cores e fontes
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'primary': '#60a5fa', // Blue-400
+                        'secondary': '#34d399', // Emerald-400
+                        'tertiary': '#f59e0b', // Amber-500
+                    },
+                }
+            }
+        }
+    </script>
+    <script type="module">
+        // Dependências do Firebase removidas. Usando apenas localStorage.
+
+        // --- Variáveis de Estado da Aplicação ---
+        
+        let projects = []; 
+
+        // Armazena comprimentos em CENTIMETROS (cm) para exibição e entrada
+        let currentProjectId = null;
+        let clientName = '';
+        let projectDetails = '';
+        let pieces = []; // Guarda length em CM
+        let stockMaterials = []; // Guarda length em CM
+        let sawKerf = 3;       // Guarda kerf em MM
+        let cutPlan = null;    
+        let editingPieceId = null; 
+        let highlightedPieceKey = null; // Chave (length CM string) da peça destacada
+
+        
+        // --- Constantes de Persistência e Conversão ---
+        const LOCAL_STORAGE_KEY = 'cutting_plans_local_v2';
+        const CM_TO_MM = 10;
+        const MM_TO_CM = 0.1;
+
+        // --- Funções Utilitárias ---
+
+        /**
+         * Formata o comprimento em CM, removendo casas decimais se for um número inteiro.
+         * @param {number} lengthCM Comprimento em CM.
+         * @returns {string} Comprimento formatado.
+         */
+        const formatLengthCM = (lengthCM) => {
+            if (lengthCM % 1 === 0) {
+                return lengthCM.toFixed(0);
+            }
+            // Usa 2 casas decimais, mas o .toString() vai limpar os zeros à direita (ex: 21.50 -> 21.5)
+            const formatted = lengthCM.toFixed(2);
+            return parseFloat(formatted).toString(); 
+        };
+
+        /**
+         * Gera uma cor consistente baseada no comprimento da peça.
+         * @param {number} lengthMM Comprimento da peça em MM.
+         * @returns {string} Código de cor hexadecimal.
+         */
+        const getPieceColor = (lengthMM) => {
+            // Cores mais distintas
+            const colors = [
+                '#34d399', // Emerald-400
+                '#60a5fa', // Blue-400
+                '#fcd34d', // Amber-300
+                '#fb7185', // Rose-400
+                '#a78bfa', // Violet-400
+                '#f472b6', // Pink-400
+                '#4ade80', // Green-400
+                '#8b5cf6', // Violet-500
+            ];
+            // Cria um índice baseado no comprimento em mm (usando um hash simples)
+            const hash = Math.floor(lengthMM / 10 + lengthMM * 3) % colors.length;
+            return colors[hash];
+        };
+
+        // --- Funções de Layout ---
+
+        const toggleCollapse = (targetId) => {
+            const content = document.getElementById(targetId);
+            const header = document.querySelector(`#${targetId.replace('Content', 'Header')}`);
+
+            if (content.classList.contains('expanded')) {
+                content.classList.remove('expanded');
+                header.classList.remove('expanded');
+                content.style.maxHeight = '0';
+                content.style.paddingTop = '0';
+                content.style.paddingBottom = '0';
+            } else {
+                // Remove expanded from all other collapsibles (Accordion behavior)
+                document.querySelectorAll('.collapsible-content.expanded').forEach(c => {
+                    c.classList.remove('expanded');
+                    document.querySelector(`#${c.id.replace('Content', 'Header')}`).classList.remove('expanded');
+                    c.style.maxHeight = '0';
+                    c.style.paddingTop = '0';
+                    c.style.paddingBottom = '0';
+                });
+
+                content.classList.add('expanded');
+                header.classList.add('expanded');
+                // Set max-height after adding expanded class (for transition)
+                content.style.maxHeight = '1000px'; 
+                
+                // Ajusta o padding para cada tipo de conteúdo
+                if (targetId === 'savedProjectsContent') {
+                    content.style.paddingTop = '0.5rem';
+                    content.style.paddingBottom = '1.5rem';
+                } else {
+                    content.style.paddingTop = '1.5rem';
+                    content.style.paddingBottom = '1.5rem';
+                }
+            }
+        };
+
+        const showCustomAlert = (message, type = 'info') => {
+            const alertBox = document.getElementById('customAlert');
+            const color = type === 'error' ? 'bg-red-500' : type === 'success' ? 'bg-secondary' : 'bg-primary';
+            
+            alertBox.textContent = message;
+            alertBox.className = `fixed bottom-4 right-4 p-4 rounded-lg shadow-xl text-white z-50 transition-transform transform ${color}`;
+            alertBox.style.transform = 'translateY(0)';
+            
+            setTimeout(() => {
+                alertBox.style.transform = 'translateY(150%)';
+            }, 3000);
+        };
+
+        // --- Gerenciamento de Destaque de Peças ---
+
+        const highlightPieces = (pieceKey) => {
+            // Se clicar na peça já destacada, remove o destaque
+            if (highlightedPieceKey === pieceKey) {
+                highlightedPieceKey = null;
+            } else {
+                highlightedPieceKey = pieceKey;
+            }
+
+            // 1. Reinicia todas as peças
+            document.querySelectorAll('.piece-segment').forEach(segment => {
+                segment.classList.remove('highlighted');
+                segment.style.opacity = ''; // Redefine opacidade
+            });
+            
+            // 2. Aplica novos destaques ou escurece
+            if (highlightedPieceKey) {
+                
+                let found = false;
+                
+                // Aplica destaque nas peças correspondentes
+                document.querySelectorAll(`.piece-segment[data-piece-key="${highlightedPieceKey}"]`).forEach(segment => {
+                    segment.classList.add('highlighted');
+                    found = true;
+                });
+                
+                if (found) {
+                    // Escurece peças que não estão destacadas
+                    document.querySelectorAll('.piece-segment').forEach(segment => {
+                        if (!segment.classList.contains('highlighted')) {
+                            segment.style.opacity = '0.4';
+                        }
+                    });
+                    showCustomAlert(`Peças de ${pieceKey} cm destacadas. Clique novamente para remover.`, 'info');
+                } else {
+                     // Caso a peça não seja encontrada (não deve ocorrer), limpa o estado
+                     highlightedPieceKey = null;
+                     showCustomAlert('Peça não encontrada no plano visualizado.', 'error');
+                }
+            } else {
+                showCustomAlert('Destaque de peças removido.', 'info');
+            }
+        };
+
+
+        // --- Gerenciamento de Persistência (localStorage) ---
+
+        const loadProjectsFromLocal = () => {
+            try {
+                const data = localStorage.getItem(LOCAL_STORAGE_KEY);
+                return data ? JSON.parse(data) : [];
+            } catch (error) {
+                console.error("Erro ao carregar projetos do localStorage:", error);
+                return [];
+            }
+        };
+
+        const saveProjectsToLocal = (updatedProjects) => {
+            try {
+                localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(updatedProjects));
+                projects = updatedProjects; // Atualiza o estado global
+                renderSavedProjects();
+            } catch (error) {
+                console.error("Erro ao salvar projetos no localStorage:", error);
+                showCustomAlert('Erro ao salvar no armazenamento local.', 'error');
+            }
+        };
+
+        const loadInitialProjects = () => {
+            projects = loadProjectsFromLocal();
+            projects.sort((a, b) => b.timestamp - a.timestamp); 
+            renderSavedProjects();
+
+            if (!projects.length) {
+                // Se não houver projetos salvos, inicia um novo projeto padrão
+                newProject();
+            } else {
+                // Carrega o projeto mais recente
+                loadProject(projects[0].id);
+            }
+        };
+
+        const newProject = () => {
+            currentProjectId = null;
+            clientName = '';
+            projectDetails = '';
+            pieces = [];
+            // Stock default de 600cm (6 metros)
+            stockMaterials = [{ id: Date.now() + Math.random(), length: 600, qty: 10, initialQty: 10 }];
+            sawKerf = 3; // mm
+            cutPlan = null;
+            editingPieceId = null;
+            highlightedPieceKey = null;
+
+            document.getElementById('clientNameInput').value = '';
+            document.getElementById('projectDetailsInput').value = '';
+            document.getElementById('results').classList.add('hidden');
+            renderStock();
+            renderPieces();
+            showCustomAlert('Novo projeto iniciado!', 'info');
+        };
+
+        const saveProject = async () => {
+            if (!clientName.trim()) {
+                showCustomAlert('Nome do Cliente é obrigatório para salvar.', 'error');
+                return;
+            }
+            
+            const projectData = {
+                id: currentProjectId || Date.now() + Math.random(),
+                clientName: clientName.trim(),
+                projectDetails: projectDetails.trim(),
+                sawKerf, // mm
+                pieces, // cm
+                // Salva o estoque original (para não perder o estado inicial se o corte for refeito)
+                stockMaterials: stockMaterials.map(s => ({ length: s.length, qty: s.initialQty })), // cm
+                timestamp: Date.now(),
+            };
+            
+            let updatedProjects = projects.filter(p => p.id !== projectData.id);
+            updatedProjects.unshift(projectData); // Adiciona o projeto atual no início
+            
+            saveProjectsToLocal(updatedProjects);
+            currentProjectId = projectData.id;
+
+            // Garante que a lista de projetos esteja visível para confirmar o salvamento
+            document.getElementById('savedProjectsContent').classList.add('expanded');
+            document.getElementById('savedProjectsHeader').classList.add('expanded');
+
+            showCustomAlert(`Projeto "${clientName}" salvo localmente!`, 'success');
+        };
+
+        const loadProject = (projectId) => {
+            const project = projects.find(p => p.id === projectId);
+            if (!project) return;
+            
+            currentProjectId = projectId;
+            clientName = project.clientName || '';
+            projectDetails = project.projectDetails || '';
+            sawKerf = project.sawKerf || 3; // mm
+            pieces = project.pieces || []; // cm
+            
+            // Recria stockMaterials, garantindo IDs únicos para gerenciamento interno
+            stockMaterials = (project.stockMaterials || []).map(s => ({
+                id: Date.now() + Math.random(),
+                length: s.length, // cm
+                qty: s.qty,
+                initialQty: s.qty,
+            }));
+            
+            document.getElementById('clientNameInput').value = clientName;
+            document.getElementById('projectDetailsInput').value = projectDetails;
+            document.getElementById('results').classList.add('hidden');
+            highlightedPieceKey = null;
+
+            renderStock();
+            renderPieces();
+            showCustomAlert(`Projeto "${clientName}" carregado!`, 'success');
+        };
+
+        const deleteProject = (projectId) => {
+            if (!projectId) return;
+
+            const updatedProjects = projects.filter(p => p.id !== projectId);
+            saveProjectsToLocal(updatedProjects);
+
+            if (currentProjectId === projectId) {
+                newProject(); 
+            }
+            showCustomAlert('Projeto excluído localmente.', 'info');
+        };
+        
+        const renderSavedProjects = () => {
+            const listDiv = document.getElementById('savedProjectsList');
+            listDiv.innerHTML = '';
+            
+            if (projects.length === 0) {
+                listDiv.innerHTML = '<p class="text-center text-gray-400 py-4 text-sm">Nenhum projeto salvo no momento.</p>';
+                return;
+            }
+
+            projects.forEach(p => {
+                const date = new Date(p.timestamp).toLocaleDateString();
+                
+                const item = document.createElement('div');
+                item.className = 'flex items-center justify-between p-3 bg-gray-700 rounded-lg mb-2 border border-gray-600';
+                item.innerHTML = `
+                    <div class="flex-1 min-w-0 mr-3">
+                        <p class="font-semibold text-white truncate">${p.clientName}</p>
+                        <p class="text-xs text-gray-400">${p.projectDetails || 'Sem detalhes'} | Salvo em ${date}</p>
+                    </div>
+                    <div class="flex space-x-2">
+                        <button onclick="window.loadProject('${p.id}')" class="bg-primary hover:bg-blue-300 text-gray-900 text-xs px-3 py-1 rounded-full font-medium transition duration-150 shadow-md">
+                            Abrir
+                        </button>
+                        <button onclick="window.deleteProject('${p.id}')" class="bg-red-500 hover:bg-red-400 text-white text-xs px-3 py-1 rounded-full font-medium transition duration-150 shadow-md">
+                            X
+                        </button>
+                    </div>
+                `;
+                listDiv.appendChild(item);
+            });
+        };
+
+        // --- Gerenciamento de Estoque, Peças e Otimização (Sem Alteração na Lógica Central) ---
+
+        const updateClientMetadata = () => {
+            clientName = document.getElementById('clientNameInput').value;
+            projectDetails = document.getElementById('projectDetailsInput').value;
+        };
+
+        const addOrUpdateStock = () => {
+            const lengthInput = document.getElementById('newStockLength');
+            const qtyInput = document.getElementById('newStockQty');
+            
+            const lengthCM = parseFloat(lengthInput.value);
+            const qty = parseInt(qtyInput.value);
+            sawKerf = parseFloat(document.getElementById('sawKerfInput').value);
+            
+            if (isNaN(lengthCM) || lengthCM <= 0 || isNaN(qty) || qty <= 0) {
+                showCustomAlert('Comprimento e Quantidade de Estoque inválidos.', 'error');
+                return;
+            }
+            if (isNaN(sawKerf) || sawKerf < 0) sawKerf = 3;
+
+            const existingStockIndex = stockMaterials.findIndex(s => s.length === lengthCM);
+            
+            if (existingStockIndex !== -1) {
+                stockMaterials[existingStockIndex].qty += qty;
+                stockMaterials[existingStockIndex].initialQty += qty;
+                showCustomAlert(`Estoque de ${lengthCM.toFixed(2)}cm somado!`, 'info');
+            } else {
+                stockMaterials.push({
+                    id: Date.now() + Math.random(), // Unique ID
+                    length: lengthCM, // cm
+                    qty,
+                    initialQty: qty,
+                });
+                showCustomAlert('Novo estoque adicionado!', 'success');
+            }
+
+            lengthInput.value = '';
+            qtyInput.value = '1';
+            
+            renderStock();
+        };
+
+        const removeStock = (id) => {
+            stockMaterials = stockMaterials.filter(s => s.id !== id);
+            renderStock();
+            showCustomAlert('Material em estoque removido.', 'info');
+        };
+
+        const renderStock = () => {
+            const stockTableBody = document.getElementById('stockTableBody');
+            stockTableBody.innerHTML = '';
+            
+            document.getElementById('sawKerfInput').value = sawKerf.toFixed(1);
+            document.getElementById('currentKerfDisplay').textContent = `${sawKerf.toFixed(1)} mm`;
+
+            if (stockMaterials.length === 0) {
+                stockTableBody.innerHTML = '<tr><td colspan="3" class="text-center py-4 text-gray-400">Nenhum estoque adicionado.</td></tr>';
+            }
+
+            stockMaterials.forEach(s => {
+                const row = document.createElement('tr');
+                row.className = 'border-b border-gray-700 hover:bg-gray-700/50';
+                row.innerHTML = `
+                    <td class="px-4 py-2 text-sm text-gray-200">${s.length.toFixed(2)} cm</td>
+                    <td class="px-4 py-2 text-sm text-gray-200">${s.initialQty}</td>
+                    <td class="px-4 py-2 text-sm text-center">
+                        <button onclick="window.removeStock(${s.id})" class="text-red-500 hover:text-red-400 focus:outline-none" title="Remover Estoque">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mx-auto" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm4 0a1 1 0 10-2 0v6a1 1 0 102 0V8z" clip-rule="evenodd" />
+                            </svg>
+                        </button>
+                    </td>
+                `;
+                stockTableBody.appendChild(row);
+            });
+        };
+
+        const savePiece = () => {
+            const lengthInput = document.getElementById('newPieceLength');
+            const qtyInput = document.getElementById('newPieceQty');
+            const groupInput = document.getElementById('newPieceGroup');
+
+            const lengthCM = parseFloat(lengthInput.value);
+            const qty = parseInt(qtyInput.value);
+            const assemblyGroup = groupInput.value.trim() || 'Geral';
+
+            if (isNaN(lengthCM) || lengthCM <= 0 || isNaN(qty) || qty <= 0) {
+                showCustomAlert('Comprimento e Quantidade de Peça inválidos.', 'error');
+                return;
+            }
+
+            const pieceIndex = pieces.findIndex(p => p.id === editingPieceId);
+
+            if (pieceIndex !== -1) {
+                pieces[pieceIndex].length = lengthCM; // cm
+                pieces[pieceIndex].qty = qty;
+                pieces[pieceIndex].assemblyGroup = assemblyGroup;
+                cancelEdit(); 
+                showCustomAlert('Peça atualizada!', 'info');
+            } else {
+                pieces.push({
+                    id: Date.now() + Math.random(),
+                    length: lengthCM, // cm
+                    qty,
+                    assemblyGroup,
+                });
+                lengthInput.value = '';
+                qtyInput.value = '1';
+                groupInput.value = '';
+                showCustomAlert('Peça adicionada!', 'info');
+            }
+
+            renderPieces();
+        };
+
+        const removePiece = (id) => {
+            pieces = pieces.filter(p => p.id !== id);
+            renderPieces();
+            showCustomAlert('Peça removida.', 'info');
+        };
+
+        const startEdit = (id) => {
+            const pieceToEdit = pieces.find(p => p.id === id);
+            if (!pieceToEdit) return;
+
+            document.getElementById('newPieceLength').value = pieceToEdit.length;
+            document.getElementById('newPieceQty').value = pieceToEdit.qty;
+            document.getElementById('newPieceGroup').value = pieceToEdit.assemblyGroup === 'Geral' ? '' : pieceToEdit.assemblyGroup;
+
+            editingPieceId = id;
+            
+            document.getElementById('addPieceButton').textContent = 'Salvar Alterações';
+            document.getElementById('cancelEditButton').classList.remove('hidden');
+            document.getElementById('newPieceLength').focus();
+        };
+        
+        const cancelEdit = () => {
+            editingPieceId = null;
+            
+            document.getElementById('newPieceLength').value = '';
+            document.getElementById('newPieceQty').value = '1';
+            document.getElementById('newPieceGroup').value = '';
+            
+            document.getElementById('addPieceButton').textContent = '+ Adicionar Peça';
+            document.getElementById('cancelEditButton').classList.add('hidden');
+        };
+        
+        const renderPieces = () => {
+            const piecesTableBody = document.getElementById('piecesTableBody');
+            const totalPieces = pieces.reduce((sum, p) => sum + p.qty, 0);
+            
+            piecesTableBody.innerHTML = '';
+
+            if (pieces.length === 0) {
+                piecesTableBody.innerHTML = '<tr><td colspan="4" class="text-center py-4 text-gray-400">Nenhuma peça adicionada.</td></tr>';
+            }
+
+            pieces.forEach((p, index) => {
+                const row = document.createElement('tr');
+                row.className = 'border-b border-gray-700 hover:bg-gray-700/50';
+                row.innerHTML = `
+                    <td class="px-4 py-2 text-sm text-gray-200">${p.length.toFixed(2)} cm</td>
+                    <td class="px-4 py-2 text-sm text-gray-200">${p.qty}</td>
+                    <td class="px-4 py-2 text-sm text-gray-400">${p.assemblyGroup || 'Geral'}</td>
+                    <td class="px-4 py-2 text-sm text-center flex space-x-2 justify-center">
+                        <button onclick="window.startEdit(${p.id})" class="text-primary hover:text-blue-300 focus:outline-none" title="Editar Peça">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zm-3.109 4.316l2.828 2.828-8.86 8.86H4v-2.828l8.86-8.86z" />
+                            </svg>
+                        </button>
+                        <button onclick="window.removePiece(${p.id})" class="text-red-500 hover:text-red-400 focus:outline-none" title="Remover Peça">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm4 0a1 1 0 10-2 0v6a1 1 0 102 0V8z" clip-rule="evenodd" />
+                            </svg>
+                        </button>
+                    </td>
+                `;
+                piecesTableBody.appendChild(row);
+            });
+            document.getElementById('totalPiecesCount').textContent = `Total de ${totalPieces} peças`;
+        };
+        
+        /**
+         * Lógica de otimização de empacotamento (Bin Packing) - SEM alteração na prioridade.
+         */
+        const findBestCutCombination = (currentLengthMM, availablePiecesMM, sawKerfMM, currentCut = [], bestWaste = Infinity, bestPieces = []) => {
+            
+            let result = { bestPieces, bestWaste };
+
+            const totalCutLength = currentCut.reduce((sum, p) => sum + p.length, 0);
+            const totalKerf = currentCut.length > 0 ? (currentCut.length - 1) * sawKerfMM : 0;
+            const currentTotalUsed = totalCutLength + totalKerf;
+            const currentWaste = currentLengthMM - currentTotalUsed;
+
+            const tolerance = 0.01;
+
+            if (currentWaste >= -tolerance && currentWaste < result.bestWaste) {
+                result.bestWaste = Math.max(0, currentWaste);
+                result.bestPieces = [...currentCut];
+                
+                if (result.bestWaste < tolerance) return result; 
+            }
+
+            for (let i = 0; i < availablePiecesMM.length; i++) {
+                const piece = availablePiecesMM[i];
+                
+                const kerfCost = currentCut.length > 0 ? sawKerfMM : 0;
+                const requiredSpace = piece.length + kerfCost;
+                
+                const potentialTotalUsed = currentTotalUsed + requiredSpace;
+                const potentialRemainingLength = currentLengthMM - potentialTotalUsed;
+
+                if (potentialRemainingLength >= -tolerance && potentialRemainingLength < result.bestWaste) { 
+                    
+                    const nextAvailablePieces = availablePiecesMM.slice(0, i).concat(availablePiecesMM.slice(i + 1));
+                    const nextCut = [...currentCut, piece];
+                    
+                    const recursiveResult = findBestCutCombination(currentLengthMM, nextAvailablePieces, sawKerfMM, nextCut, result.bestWaste, result.bestPieces);
+                    
+                    if (recursiveResult.bestWaste < result.bestWaste) {
+                        result = recursiveResult;
+                    }
+                }
+            }
+
+            return result;
+        };
+
+
+        const calculatePlan = () => {
+            if (pieces.length === 0) {
+                showCustomAlert('Adicione peças para calcular.', 'error');
+                return;
+            }
+            if (stockMaterials.length === 0) {
+                showCustomAlert('Adicione material em estoque.', 'error');
+                return;
+            }
+            
+            // --- 1. PREPARAÇÃO (Conversão para MM e Cores) ---
+            
+            let requiredPiecesMM = [];
+            const colorMap = new Map();
+            
+            // Inicializa a contagem total de peças necessárias por tipo
+            const initialPieceCount = new Map();
+
+            pieces.forEach((p, index) => {
+                const lengthMM = p.length * CM_TO_MM;
+                const lengthKey = p.length.toFixed(2);
+                
+                if (!colorMap.has(lengthKey)) {
+                    colorMap.set(lengthKey, getPieceColor(lengthMM));
+                }
+                const pieceColor = colorMap.get(lengthKey);
+
+                for (let i = 0; i < p.qty; i++) {
+                    const uniquePieceId = Date.now() + Math.random() + i;
+                    requiredPiecesMM.push({ 
+                        id: uniquePieceId, 
+                        length: lengthMM, 
+                        cut: false, 
+                        color: pieceColor,
+                        lengthCM: p.length,
+                        assemblyGroup: p.assemblyGroup || 'Geral' // Adiciona o grupo
+                    }); 
+                }
+                
+                // Popula a contagem inicial para o relatório final
+                const key = `${p.length.toFixed(2)} cm | Grupo: ${p.assemblyGroup || 'Geral'}`;
+                initialPieceCount.set(key, (initialPieceCount.get(key) || 0) + p.qty);
+            });
+            
+            // Otimização estrita: continua priorizando cortes maiores primeiro (Best Fit Decreasing)
+            requiredPiecesMM.sort((a, b) => b.length - a.length);
+            
+            let scrapStockMM = []; 
+            let originalStockMM = stockMaterials.map(s => ({ 
+                id: s.id, 
+                length: s.length * CM_TO_MM, 
+                qty: s.qty, 
+                initialQty: s.initialQty,
+                usedQty: 0,
+                lengthCM: s.length,
+            })); 
+
+            let detailedPlan = []; 
+            let totalWasteMM = 0;
+            let sheetCounter = 0; 
+            const tolerance = 0.01;
+            
+            // 3. Loop principal: enquanto houver peças não cortadas
+            while (requiredPiecesMM.some(p => !p.cut)) {
+                
+                const piecesToCut = requiredPiecesMM.filter(p => !p.cut);
+                
+                let bestSheetPlan = null; 
+                
+                // --- 3.1. Criar lista de todos os bins disponíveis para simulação (em MM) ---
+                let availableBinsMM = [];
+                
+                // A) Retalhos (Scrap) - Prioridade
+                scrapStockMM.sort((a, b) => b.length - a.length); 
+                scrapStockMM.forEach((s) => {
+                    availableBinsMM.push({ 
+                        length: s.length, 
+                        isScrap: true, 
+                        stockType: s.length,
+                        scrapId: s.id, 
+                        sourceSheetId: s.sourceSheetId || 0,
+                        lengthCM: s.length * MM_TO_CM,
+                    });
+                });
+                
+                // B) Estoque Novo (Original)
+                originalStockMM.sort((a, b) => a.length - b.length);
+                originalStockMM.forEach((s) => {
+                    if (s.usedQty < s.initialQty) {
+                        availableBinsMM.push({ 
+                            length: s.length, 
+                            isScrap: false, 
+                            stockType: s.length,
+                            lengthCM: s.lengthCM,
+                        });
+                    }
+                });
+
+
+                // --- 3.2. Otimização Global: Seleção do Melhor Encaixe (Hierarquia de Aproveitamento) ---
+                for (const bin of availableBinsMM) {
+                    
+                    const { bestPieces: cutPiecesMM, bestWaste: wasteMM } = findBestCutCombination(
+                        bin.length, // mm
+                        piecesToCut, // mm
+                        sawKerf // mm
+                    );
+                    
+                    if (cutPiecesMM.length > 0) {
+                        
+                        const totalCutLength = cutPiecesMM.reduce((sum, p) => sum + p.length, 0);
+                        const totalKerf = (cutPiecesMM.length > 0 ? cutPiecesMM.length - 1 : 0) * sawKerf;
+                        const totalUsedLength = totalCutLength + totalKerf;
+                        const utilization = totalUsedLength / bin.length;
+
+                        const currentPlanCandidate = {
+                            stockType: bin.stockType,
+                            isScrap: bin.isScrap,
+                            cutPiecesMM, 
+                            wasteMM, 
+                            initialLengthMM: bin.length,
+                            initialLengthCM: bin.lengthCM,
+                            totalUsedLengthMM: totalUsedLength,
+                            utilization,
+                            scrapId: bin.scrapId || null,
+                            sourceSheetId: bin.sourceSheetId || 0,
+                        };
+
+                        let isBetter = false;
+                        
+                        if (bestSheetPlan === null) {
+                            isBetter = true;
+                        } else {
+                            if (currentPlanCandidate.isScrap !== bestSheetPlan.isScrap) {
+                                if (currentPlanCandidate.isScrap) { 
+                                    isBetter = true; 
+                                } else if (bestSheetPlan.isScrap) {
+                                    isBetter = false; 
+                                }
+                            } 
+                            else if (currentPlanCandidate.utilization > bestSheetPlan.utilization + 0.0001) { 
+                                isBetter = true;
+                            } else if (currentPlanCandidate.utilization < bestSheetPlan.utilization - 0.0001) {
+                                isBetter = false;
+                            }
+                            else if (currentPlanCandidate.wasteMM < bestSheetPlan.wasteMM - tolerance) {
+                                isBetter = true;
+                            } else if (currentPlanCandidate.wasteMM > bestSheetPlan.wasteMM + tolerance) {
+                                isBetter = false;
+                            }
+                            else if (!currentPlanCandidate.isScrap && currentPlanCandidate.initialLengthMM < bestSheetPlan.initialLengthMM) {
+                                isBetter = true;
+                            }
+                        }
+                        
+                        if (isBetter) {
+                            bestSheetPlan = currentPlanCandidate;
+                        }
+                    }
+                }
+                
+                // --- 3.3. Executar o Melhor Corte Encontrado ---
+                if (bestSheetPlan) {
+                    
+                    let currentSheetId;
+
+                    if (!bestSheetPlan.isScrap) {
+                        sheetCounter++;
+                        currentSheetId = sheetCounter;
+
+                        const originalStockIndex = originalStockMM.findIndex(s => s.length === bestSheetPlan.stockType && s.usedQty < s.initialQty);
+                        if(originalStockIndex !== -1) {
+                            originalStockMM[originalStockIndex].usedQty++;
+                        }
+                    } else {
+                        currentSheetId = bestSheetPlan.sourceSheetId;
+
+                        const scrapIndex = scrapStockMM.findIndex(s => s.id === bestSheetPlan.scrapId);
+                        if (scrapIndex !== -1) {
+                            scrapStockMM.splice(scrapIndex, 1);
+                        }
+                    }
+                    
+                    const piecesForDetailedPlan = [];
+                    for (const cutPiece of bestSheetPlan.cutPiecesMM) {
+                        const indexToMark = requiredPiecesMM.findIndex(p => !p.cut && p.id === cutPiece.id); 
+                        if (indexToMark !== -1) {
+                            requiredPiecesMM[indexToMark].cut = true;
+                            piecesForDetailedPlan.push({
+                                lengthMM: cutPiece.length,
+                                lengthCM: cutPiece.lengthCM,
+                                color: cutPiece.color,
+                                assemblyGroup: cutPiece.assemblyGroup // Adiciona o grupo da peça
+                            });
+                        }
+                    }
+                    
+                    const remainingLengthMM = bestSheetPlan.wasteMM; 
+                    const MIN_REUSABLE_LENGTH = sawKerf + 0.1; 
+                    
+                    let generatedScrapLengthMM = 0;
+                    let finalCutWasteMM = remainingLengthMM;
+
+                    if (remainingLengthMM >= MIN_REUSABLE_LENGTH) { 
+                        const newScrap = { 
+                            id: Date.now() + Math.random(), 
+                            length: remainingLengthMM,
+                            sourceSheetId: currentSheetId 
+                        };
+                        scrapStockMM.push(newScrap);
+                        generatedScrapLengthMM = remainingLengthMM;
+                        finalCutWasteMM = 0;
+                    } else {
+                        totalWasteMM += remainingLengthMM;
+                    }
+                    
+                    detailedPlan.push({
+                        id: currentSheetId,
+                        stockTypeCM: bestSheetPlan.initialLengthCM,
+                        initialLengthMM: bestSheetPlan.initialLengthMM,
+                        pieces: piecesForDetailedPlan,
+                        cutsCount: piecesForDetailedPlan.length,
+                        isScrap: bestSheetPlan.isScrap, 
+                        wasteMM: finalCutWasteMM, 
+                        generatedScrapLengthMM: generatedScrapLengthMM,
+                    });
+                    
+                } else {
+                    break;
+                }
+            } 
+
+            // 4. Finalizar o plano e calcular estatísticas globais (Merge para Visualização)
+            
+            const piecesNotCutList = {};
+            requiredPiecesMM.filter(p => !p.cut).forEach(p => {
+                const key = `${p.lengthCM.toFixed(2)} cm | Grupo: ${p.assemblyGroup || 'Geral'}`;
+                piecesNotCutList[key] = (piecesNotCutList[key] || 0) + 1;
+            });
+            
+            const piecesCutCount = new Map();
+            requiredPiecesMM.filter(p => p.cut).forEach(p => {
+                const key = `${p.lengthCM.toFixed(2)} cm | Grupo: ${p.assemblyGroup || 'Geral'}`;
+                piecesCutCount.set(key, (piecesCutCount.get(key) || 0) + 1);
+            });
+
+            // Calcula o total de peças que faltaram
+            const totalPiecesFaltantes = requiredPiecesMM.filter(p => !p.cut).length;
+
+
+            const totalLengthOfPiecesMM = requiredPiecesMM.reduce((sum, p) => sum + p.length, 0);
+
+            const sheetsMap = new Map();
+            let finalTotalWasteMM = 0; 
+            
+            detailedPlan.forEach(cutSheet => {
+                const sheetId = cutSheet.id;
+                
+                if (!sheetsMap.has(sheetId)) {
+                    sheetsMap.set(sheetId, {
+                        id: sheetId,
+                        initialLengthCM: cutSheet.stockTypeCM,
+                        initialLengthMM: cutSheet.initialLengthMM,
+                        allPiecesMM: [], 
+                        totalKerfLossMM: 0,
+                        cutsCount: 0,
+                    });
+                }
+                
+                const primarySheet = sheetsMap.get(sheetId);
+                
+                primarySheet.allPiecesMM.push(...cutSheet.pieces);
+                primarySheet.cutsCount += cutSheet.pieces.length;
+            });
+            
+            const mergedPlan = Array.from(sheetsMap.values());
+            
+            mergedPlan.forEach(sheet => {
+                const totalPiecesInSheet = sheet.allPiecesMM.length;
+                sheet.totalKerfLossMM = totalPiecesInSheet > 0 ? (totalPiecesInSheet - 1) * sawKerf : 0;
+                
+                const totalPieceLengthMM = sheet.allPiecesMM.reduce((sum, p) => sum + p.lengthMM, 0);
+                
+                const totalUsedMM = totalPieceLengthMM + sheet.totalKerfLossMM;
+                
+                sheet.finalWasteMM = Math.max(0, sheet.initialLengthMM - totalUsedMM);
+                
+                finalTotalWasteMM += sheet.finalWasteMM;
+            });
+
+            // --- 5. ESTRUTURA FINAL (Resultados) ---
+            cutPlan = {
+                plan: mergedPlan, 
+                detailedPlan: detailedPlan, 
+                stockUsage: originalStockMM.map(s => ({ ...s, lengthCM: s.length * MM_TO_CM })),
+                sawKerf,
+                totalLengthOfPiecesCM: totalLengthOfPiecesMM * MM_TO_CM,
+                totalWasteMM: finalTotalWasteMM, 
+                totalPiecesCount: requiredPiecesMM.length,
+                piecesNotCut: totalPiecesFaltantes,
+                piecesNotCutList: piecesNotCutList, // Adiciona a lista de faltantes
+                totalStockUsedLengthMM: originalStockMM.reduce((sum, s) => sum + s.usedQty * s.length, 0),
+            };
+            
+            renderResults();
+            showCustomAlert('Plano de corte OTIMIZADO calculado!', 'success');
+        };
+
+
+        // --- Renderização de Resultados ---
+
+        const renderResults = () => {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.classList.remove('hidden');
+            
+            // Remove qualquer destaque anterior ao recalcular
+            highlightedPieceKey = null; 
+
+            if (!cutPlan || cutPlan.plan.length === 0) {
+                resultsDiv.innerHTML = '<p class="text-center text-gray-400 p-8">Nenhuma chapa utilizada ou erro no cálculo.</p>';
+                return;
+            }
+            
+            const totalStockUsed = cutPlan.stockUsage.reduce((sum, s) => sum + s.usedQty, 0);
+            const totalStockAvailable = cutPlan.stockUsage.reduce((sum, s) => sum + s.initialQty, 0);
+            
+            const totalStockUsedLengthMM = cutPlan.totalStockUsedLengthMM;
+            const utilizedLengthMM = totalStockUsedLengthMM - cutPlan.totalWasteMM;
+            const percentageUsed = totalStockUsedLengthMM > 0 ? (utilizedLengthMM / totalStockUsedLengthMM) * 100 : 0;
+            const piecesNotCutText = cutPlan.piecesNotCut > 0 ? `${cutPlan.piecesNotCut} (Faltam)` : '0 (Completo)';
+
+            let faltantesHtml = '';
+            if (cutPlan.piecesNotCut > 0) {
+                faltantesHtml = `
+                    <div class="mt-4 p-3 bg-red-800/50 rounded-lg border border-red-700">
+                        <h4 class="font-semibold text-red-400 mb-2">Peças Faltantes:</h4>
+                        <ul class="list-disc pl-5 text-sm text-gray-200">
+                            ${Object.entries(cutPlan.piecesNotCutList).map(([key, qty]) => 
+                                `<li class="text-red-300">Faltam ${qty} peças de ${key}</li>`
+                            ).join('')}
+                        </ul>
+                    </div>
+                `;
+            }
+
+            const statsHtml = `
+                <div class="bg-gray-800 rounded-xl shadow-2xl p-6 mb-8 border border-gray-700">
+                    <h2 class="text-xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Estatísticas Gerais</h2>
+                    <div class="grid grid-cols-2 gap-y-3 gap-x-4 text-sm text-gray-300">
+                        <div class="font-medium text-gray-400">Chapas/Tiras usadas:</div>
+                        <div class="font-semibold text-primary">${totalStockUsed} de ${totalStockAvailable}</div>
+                        
+                        <div class="font-medium text-gray-400">Aproveitamento:</div>
+                        <div class="font-semibold text-secondary">${percentageUsed.toFixed(1)}%</div>
+                        
+                        <div class="font-medium text-gray-400">Comprimento Útil:</div>
+                        <div class="font-semibold text-gray-200">${(utilizedLengthMM * MM_TO_CM).toFixed(2)} cm</div>
+                        
+                        <div class="font-medium text-gray-400">Refugo total:</div>
+                        <div class="font-semibold text-amber-500">${cutPlan.totalWasteMM.toFixed(2)} mm</div>
+                        
+                        <div class="font-medium text-gray-400">Total de Cortes:</div>
+                        <div class="font-semibold text-gray-200">${cutPlan.detailedPlan.reduce((sum, sheet) => sum + sheet.cutsCount, 0)}</div>
+                        
+                        <div class="font-medium text-gray-400">Total de Peças Faltantes:</div>
+                        <div class="font-semibold ${cutPlan.piecesNotCut > 0 ? 'text-red-500' : 'text-secondary'}">${piecesNotCutText}</div>
+                    </div>
+                    ${faltantesHtml}
+                </div>
+            `;
+
+            // --- VISUALIZAÇÃO UNIFICADA (usa cutPlan.plan) ---
+            const planVisualHtml = cutPlan.plan.map(sheet => {
+                let piecesHtml = '';
+                
+                // 1. Informações da chapa
+                const initialLengthMM = sheet.initialLengthMM;
+                const remainingLengthMM = sheet.finalWasteMM; 
+                
+                // 2. Renderiza todas as peças e kerfs
+                sheet.allPiecesMM.forEach((piece, index) => {
+                    const pieceLengthMM = piece.lengthMM;
+                    const pieceWidthPercent = (pieceLengthMM / initialLengthMM) * 100;
+                    
+                    // Kerf antes da peça (exceto a primeira)
+                    if (index > 0) {
+                        const kerfWidthPercent = (cutPlan.sawKerf / initialLengthMM) * 100;
+                        piecesHtml += `<div class="kerf-segment" style="width: ${kerfWidthPercent.toFixed(2)}%;" title="Serra: ${cutPlan.sawKerf.toFixed(1)}mm"></div>`;
+                    }
+                    
+                    // --- LÓGICA DE VISIBILIDADE E FORMATO DO TEXTO ---
+                    const pieceLengthCM = piece.lengthCM;
+                    const pieceKey = pieceLengthCM.toFixed(2); // Chave de destaque
+                    
+                    // Mostra o texto se o segmento for maior que 3% da chapa
+                    const displayPieceText = pieceWidthPercent > 3.0 ? formatLengthCM(pieceLengthCM) : ''; 
+                    
+                    piecesHtml += `
+                        <div 
+                            class="piece-segment" 
+                            style="width: ${pieceWidthPercent.toFixed(2)}%; background-color: ${piece.color};" 
+                            title="Peça: ${pieceLengthCM.toFixed(2)}cm, Grupo: ${piece.assemblyGroup} - Clique para destacar iguais"
+                            onclick="window.highlightPieces('${pieceKey}')"
+                            data-piece-key="${pieceKey}"
+                        >
+                            ${displayPieceText}
+                        </div>
+                    `;
+                });
+                
+                // 3. Renderiza a SOBRA FINAL (o que não foi reutilizado)
+                const wastePercent = (remainingLengthMM / initialLengthMM) * 100; 
+                const finalWasteColor = remainingLengthMM >= (cutPlan.sawKerf + 0.1) ? '#f59e0b' : '#44403c'; 
+                const finalWasteText = remainingLengthMM >= (cutPlan.sawKerf + 0.1) ? 'Refugo Reutilizável' : 'Refugo Descartado';
+                
+                const wasteLengthCM = remainingLengthMM * MM_TO_CM;
+                // Mostra o texto da sobra se for maior que 3%
+                const displayWasteText = wastePercent > 3.0 ? `${formatLengthCM(wasteLengthCM)} cm` : '';
+                
+                // Adiciona o segmento de desperdício final
+                if (remainingLengthMM > 0.1) { 
+                    piecesHtml += `
+                        <div class="waste-segment" style="width: ${wastePercent.toFixed(2)}%; background-color: ${finalWasteColor};" title="Sobra/Refugo FINAL: ${remainingLengthMM.toFixed(2)}mm (${finalWasteText})">
+                            ${displayWasteText}
+                        </div>
+                    `;
+                }
+
+
+                const sheetTitle = `Chapa ${sheet.id}`;
+                
+
+                return `
+                    <div class="mb-6 p-4 border border-gray-700 rounded-lg bg-gray-700/50">
+                        <h3 class="font-semibold text-md mb-2 text-primary">
+                            ${sheetTitle}
+                        </h3>
+                        <div class="cut-bar bg-gray-900 border border-gray-600">
+                            ${piecesHtml}
+                        </div>
+                        <p class="text-xs text-gray-400 mt-2">
+                           Comprimento Inicial: ${sheet.initialLengthCM.toFixed(2)} cm | 
+                           Sobra Final: ${remainingLengthMM.toFixed(2)} mm (${finalWasteText})
+                        </p>
+                    </div>
+                `;
+            }).join('');
+
+
+            // --- DETALHES DE CORTES SEQUENCIAIS (usa cutPlan.detailedPlan) ---
+            let cutDetailIndex = 1;
+            const cutsDetailHtml = cutPlan.detailedPlan.map(sheet => {
+                let currentCumulativeLengthMM = 0;
+                let currentSheetName = sheet.isScrap ? `RETALHO (Chapa ${sheet.id})` : `PAINEL ${sheet.id}`;
+
+                const sheetCuts = sheet.pieces.map((piece, index) => {
+                    const kerfCost = index > 0 ? cutPlan.sawKerf : 0;
+                    const cutLengthMM = piece.lengthMM + kerfCost;
+                    
+                    // Ponto de Medição Cumulativo
+                    currentCumulativeLengthMM += cutLengthMM;
+                    
+                    // Restante da barra
+                    const remainingMM = sheet.initialLengthMM - currentCumulativeLengthMM;
+                    
+                    const rowHtml = `
+                        <tr class="border-b border-gray-700 hover:bg-gray-700/50">
+                            <td class="px-4 py-2 text-sm text-gray-400">${cutDetailIndex++}</td>
+                            <td class="px-4 py-2 text-sm text-gray-200">${currentSheetName} (${sheet.stockTypeCM.toFixed(2)}cm)</td>
+                            <td class="px-4 py-2 text-sm text-gray-400">${piece.assemblyGroup}</td>
+                            <td class="px-4 py-2 text-sm font-medium" style="background-color: ${piece.color}; color: #1f2937;">${piece.lengthCM.toFixed(2)} cm</td>
+                            <td class="px-4 py-2 text-sm text-secondary font-bold">${(currentCumulativeLengthMM * MM_TO_CM).toFixed(2)} cm</td>
+                            <td class="px-4 py-2 text-sm text-gray-400">${(remainingMM * MM_TO_CM).toFixed(2)} cm</td>
+                        </tr>
+                    `;
+                    return rowHtml;
+                }).join('');
+                
+                const wasteText = sheet.wasteMM > 0 ? 'Refugo Descartado (mm)' : sheet.generatedScrapLengthMM > 0 ? 'Retalho Gerado (mm)' : 'Consumido Totalmente';
+                const wasteColor = sheet.wasteMM > 0 ? 'text-red-400' : sheet.generatedScrapLengthMM > 0 ? 'text-amber-500' : 'text-secondary';
+                const wasteLengthMM = sheet.generatedScrapLengthMM > 0 ? sheet.generatedScrapLengthMM : sheet.wasteMM;
+                
+                const startTitle = sheet.isScrap 
+                    ? `USO DE RETALHO (Gerado na Chapa ${sheet.sourceSheetId || sheet.id}) | `
+                    : `INÍCIO DO PAINEL ${sheet.id} (${sheet.stockTypeCM.toFixed(2)}cm) | `;
+
+                return `<tr class="bg-gray-700"><td colspan="6" class="px-4 py-2 text-xs font-bold ${sheet.isScrap ? 'text-amber-500' : 'text-primary'}">${startTitle}<span class="${wasteColor}">SOBRA APÓS ESTES CORTES</span>: ${wasteLengthMM.toFixed(2)} ${wasteLengthMM > 0 ? 'mm' : ''} (${wasteText})</td></tr>${sheetCuts}`;
+            }).join('');
+
+
+            resultsDiv.innerHTML = `
+                ${statsHtml}
+
+                <div class="bg-gray-800 rounded-xl shadow-2xl p-6 mb-8 border border-gray-700">
+                    <h2 class="text-xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Visualização Unificada do Plano de Corte</h2>
+                    <p class="text-sm text-gray-400 mb-4">Clique em qualquer peça colorida para destacar todas as peças de mesmo tamanho no plano.</p>
+                    <div class="overflow-x-auto">
+                        ${planVisualHtml}
+                    </div>
+                </div>
+
+                <div class="bg-gray-800 rounded-xl shadow-2xl p-6 mb-8 border border-gray-700 overflow-x-auto">
+                    <h2 class="text-xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Detalhes dos Cortes (Sequência para o Serralheiro)</h2>
+                    <p class="text-sm text-gray-400 mb-4 font-bold">IMPORTANTE: A coluna "Ponto de Medição" indica o ponto exato onde a LÂMINA da serra deve tocar, medido a partir da ponta zero da barra/painel. Isso acelera o corte na bancada.</p>
+                    
+                    <table class="min-w-full divide-y divide-gray-700">
+                        <thead class="bg-gray-900">
+                            <tr>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">#</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Material (cm)</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Grupo</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Corte (Tamanho cm)</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider text-secondary">Ponto de Medição (cm)</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Restante (cm)</th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-gray-800 divide-y divide-gray-700">
+                            ${cutsDetailHtml}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+            
+            resultsDiv.scrollIntoView({ behavior: 'smooth' });
+        };
+
+
+        // --- Exportações para o Escopo Global (window) ---
+        window.saveProject = saveProject;
+        window.loadProject = loadProject;
+        window.deleteProject = deleteProject;
+        window.newProject = newProject;
+        window.removeStock = removeStock;
+        window.startEdit = startEdit;
+        window.removePiece = removePiece;
+        window.calculatePlan = calculatePlan;
+        window.addOrUpdateStock = addOrUpdateStock;
+        window.updateClientMetadata = updateClientMetadata;
+        window.savePiece = savePiece;
+        window.cancelEdit = cancelEdit;
+        window.renderStock = renderStock;
+        window.toggleCollapse = toggleCollapse; 
+        window.highlightPieces = highlightPieces;
+        
+        // --- Inicialização ---
+
+        loadInitialProjects(); // Chama o carregamento local
+
+    </script>
+</head>
+<body class="bg-gray-900 p-4 sm:p-8 text-gray-100">
+    <div class="max-w-4xl mx-auto">
+
+        <!-- Alerta Customizado -->
+        <div id="customAlert" class="fixed bottom-4 right-4 p-4 rounded-lg shadow-xl text-white z-50 transition-transform duration-300 transform translate-y-[150%]"></div>
+
+        <!-- Gerenciamento de Projetos -->
+        <div class="bg-gray-800 rounded-xl shadow-2xl p-6 mb-8 border-l-4 border-tertiary">
+            <h2 class="text-xl font-bold text-white mb-4 flex items-center">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mr-2 text-tertiary" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h8a2 2 0 012 2v12a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm6 2a1 1 0 100 2 1 1 0 000-2zm0 4a1 1 0 100 2 1 1 0 000-2zm0 4a1 1 0 100 2 1 1 0 000-2z" clip-rule="evenodd" />
+                </svg>
+                Detalhes do Projeto
+            </h2>
+            
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+                <div class="sm:col-span-1">
+                    <label for="clientNameInput" class="block text-sm font-medium text-gray-300">Nome do Cliente (Obrigatório)</label>
+                    <input type="text" id="clientNameInput" placeholder="Ex: Móveis Andrade" oninput="window.updateClientMetadata()" class="mt-1 block w-full rounded-md shadow-sm p-2 border dark-input focus:ring-tertiary focus:border-tertiary">
+                </div>
+                <div class="sm:col-span-1">
+                    <label for="projectDetailsInput" class="block text-sm font-medium text-gray-300">Detalhes (Opcional)</label>
+                    <input type="text" id="projectDetailsInput" placeholder="Ex: Cozinha Planejada" oninput="window.updateClientMetadata()" class="mt-1 block w-full rounded-md shadow-sm p-2 border dark-input focus:ring-tertiary focus:border-tertiary">
+                </div>
+            </div>
+
+            <div class="grid grid-cols-3 gap-4">
+                <button onclick="window.saveProject()" class="col-span-3 sm:col-span-1 bg-tertiary text-gray-900 py-2 px-4 rounded-md shadow-lg hover:bg-amber-600 transition duration-150 font-semibold">
+                    Salvar Projeto
+                </button>
+                <button onclick="window.newProject()" class="col-span-3 sm:col-span-1 bg-gray-600 text-white py-2 px-4 rounded-md shadow-lg hover:bg-gray-500 transition duration-150 font-semibold">
+                    Novo Projeto
+                </button>
+                <button onclick="window.deleteProject(currentProjectId)" class="col-span-3 sm:col-span-1 bg-red-700 text-white py-2 px-4 rounded-md shadow-lg hover:bg-red-600 transition duration-150 font-semibold">
+                    Excluir Atual
+                </button>
+            </div>
+            
+            <!-- Projetos Salvos (Acordeão) -->
+            <div id="savedProjectsHeader" onclick="window.toggleCollapse('savedProjectsContent')" class="collapsible-header cursor-pointer mt-6 border-t border-gray-700 pt-4 flex justify-between items-center hover:bg-gray-700/70 rounded-md transition duration-150">
+                <h3 class="font-bold text-gray-200">Projetos Salvos Localmente</h3>
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-400 transform transition-transform duration-300" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />
+                </svg>
+            </div>
+            <div id="savedProjectsContent" class="collapsible-content">
+                <div class="max-h-60 overflow-y-auto pr-2">
+                    <div id="savedProjectsList">
+                        <!-- Lista de projetos carregados do localStorage -->
+                        <p class="text-center text-gray-400">Carregando projetos...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Configuração de Estoque (Acordeão) -->
+        <div class="bg-gray-800 rounded-xl shadow-2xl mb-8 border-l-4 border-primary">
+            <div id="stockHeader" onclick="window.toggleCollapse('stockContent')" class="collapsible-header cursor-pointer p-4 flex justify-between items-center hover:bg-gray-700/70 rounded-t-xl transition duration-150">
+                <h2 class="text-xl font-bold text-white flex items-center">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mr-2 text-primary" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clip-rule="evenodd" />
+                    </svg>
+                    Estoque de Material
+                </h2>
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-400 transform transition-transform duration-300" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />
+                </svg>
+            </div>
+            <div id="stockContent" class="collapsible-content">
+                <div class="px-6 pb-6">
+                    <div class="grid grid-cols-3 sm:grid-cols-4 gap-4 mb-4">
+                        <div>
+                            <label for="newStockLength" class="block text-sm font-medium text-gray-300">Comprimento da Chapa (cm)</label>
+                            <input type="number" id="newStockLength" placeholder="Ex: 600.00" class="mt-1 block w-full rounded-md shadow-sm p-2 border dark-input focus:ring-primary focus:border-primary">
+                        </div>
+                        <div>
+                            <label for="newStockQty" class="block text-sm font-medium text-gray-300">Qtd. (unid)</label>
+                            <input type="number" id="newStockQty" value="1" min="1" class="mt-1 block w-full rounded-md shadow-sm p-2 border dark-input focus:ring-primary focus:border-primary">
+                        </div>
+                        <div>
+                            <label for="sawKerfInput" class="block text-sm font-medium text-gray-300">Espessura da Serra (mm)</label>
+                            <input type="number" id="sawKerfInput" value="3.0" step="0.5" onchange="window.renderStock()" class="mt-1 block w-full rounded-md shadow-sm p-2 border dark-input focus:ring-primary focus:border-primary">
+                            <p class="text-xs text-gray-400 mt-1">Atual: <span id="currentKerfDisplay" class="font-semibold">3.0 mm</span></p>
+                        </div>
+                        <div class="flex items-end">
+                            <button onclick="window.addOrUpdateStock()" class="w-full bg-primary text-gray-900 py-2 px-4 rounded-md shadow-md hover:bg-blue-300 transition duration-150 font-semibold">
+                                + Adicionar/Somar
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="overflow-x-auto mt-6">
+                        <h3 class="font-medium text-gray-300 mb-2">Estoque Disponível:</h3>
+                        <table class="min-w-full divide-y divide-gray-700">
+                            <thead class="bg-gray-700">
+                                <tr>
+                                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Comprimento (cm)</th>
+                                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Qtd. Inicial</th>
+                                    <th class="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase tracking-wider">Ação</th>
+                                </tr>
+                            </thead>
+                            <tbody id="stockTableBody" class="bg-gray-800 divide-y divide-gray-700">
+                                <!-- Estoques serão renderizados aqui pelo JavaScript -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Cadastro e Edição de Peças (Acordeão) -->
+        <div class="bg-gray-800 rounded-xl shadow-2xl mb-8 border-l-4 border-secondary">
+            <div id="piecesHeader" onclick="window.toggleCollapse('piecesContent')" class="collapsible-header cursor-pointer p-4 flex justify-between items-center hover:bg-gray-700/70 rounded-t-xl transition duration-150">
+                <h2 class="text-xl font-bold text-white flex items-center">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mr-2 text-secondary" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M7 3a1 1 0 000 2h6a1 1 0 100-2H7zM4 5h12v10a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 2v6h2V7H7zm4 0v6h2V7h-2z" />
+                    </svg>
+                    Peças a Cortar
+                </h2>
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-400 transform transition-transform duration-300" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />
+                </svg>
+            </div>
+
+            <div id="piecesContent" class="collapsible-content">
+                <div class="px-6 pb-6">
+                    <div class="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-4">
+                        <div class="col-span-2">
+                            <label for="newPieceLength" class="block text-sm font-medium text-gray-300">Comprimento (cm)</label>
+                            <input type="number" id="newPieceLength" placeholder="Ex: 21.50" class="mt-1 block w-full rounded-md shadow-sm p-2 border dark-input focus:ring-secondary focus:border-secondary">
+                        </div>
+                        <div>
+                            <label for="newPieceQty" class="block text-sm font-medium text-gray-300">Qtd.</label>
+                            <input type="number" id="newPieceQty" value="1" min="1" class="mt-1 block w-full rounded-md shadow-sm p-2 border dark-input focus:ring-secondary focus:border-secondary">
+                        </div>
+                        <div class="col-span-2">
+                            <label for="newPieceGroup" class="block text-sm font-medium text-gray-300">Grupo de Montagem (Opcional)</label>
+                            <input type="text" id="newPieceGroup" placeholder="Ex: Portão A" class="mt-1 block w-full rounded-md shadow-sm p-2 border dark-input focus:ring-secondary focus:border-secondary">
+                        </div>
+                        
+                        <div class="col-span-2 sm:col-span-3 flex flex-col justify-end space-y-2">
+                            <button id="addPieceButton" onclick="window.savePiece()" class="w-full bg-secondary text-gray-900 py-2 px-4 rounded-md shadow-md hover:bg-emerald-300 transition duration-150 font-semibold">
+                                + Adicionar Peça
+                            </button>
+                            <button id="cancelEditButton" onclick="window.cancelEdit()" class="hidden w-full bg-gray-600 text-white py-1 px-4 text-xs rounded-md shadow-md hover:bg-gray-500 transition duration-150 font-medium">
+                                Cancelar Edição
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="overflow-x-auto mt-6">
+                        <table class="min-w-full divide-y divide-gray-700">
+                            <thead class="bg-gray-700">
+                                <tr>
+                                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Comprimento (cm)</th>
+                                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Qtd.</th>
+                                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Grupo</th>
+                                    <th class="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase tracking-wider">Ações</th>
+                                </tr>
+                            </thead>
+                            <tbody id="piecesTableBody" class="bg-gray-800 divide-y divide-gray-700">
+                                <!-- Peças serão renderizadas aqui pelo JavaScript -->
+                            </tbody>
+                        </table>
+                    </div>
+                    <p id="totalPiecesCount" class="text-right text-sm font-medium text-gray-400 mt-2"></p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Botão de Cálculo -->
+        <button onclick="window.calculatePlan()" class="w-full bg-tertiary text-gray-900 py-4 text-lg font-bold rounded-xl shadow-xl hover:bg-amber-600 transition duration-150 transform hover:scale-[1.01] focus:outline-none focus:ring-4 focus:ring-tertiary focus:ring-offset-2 mb-8">
+            CALCULAR PLANO DE CORTE OTIMIZADO
+        </button>
+
+        <!-- Resultados e Visualização -->
+        <div id="results" class="hidden">
+            <!-- Resultados serão renderizados aqui pelo JavaScript -->
+        </div>
+
+    </div>
+</body>
+</html>
+
