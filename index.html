@@ -102,8 +102,6 @@
         }
     </script>
     <script type="module">
-        // Dependências do Firebase removidas. Usando apenas localStorage.
-
         // --- Variáveis de Estado da Aplicação ---
         
         let projects = []; 
@@ -113,7 +111,7 @@
         let clientName = '';
         let projectDetails = '';
         let pieces = []; // Guarda length em CM
-        let stockMaterials = []; // Guarda length em CM
+        let stockMaterials = []; 
         let sawKerf = 3;       // Guarda kerf em MM
         let cutPlan = null;    
         let editingPieceId = null; 
@@ -124,6 +122,9 @@
         const LOCAL_STORAGE_KEY = 'cutting_plans_local_v2';
         const CM_TO_MM = 10;
         const MM_TO_CM = 0.1;
+        // **MODIFICADO: Cor para refugo reutilizável (Gray-400)**
+        const REUSABLE_SCRAP_COLOR_HEX = '#9ca3af'; // Gray-400
+        const REUSABLE_SCRAP_COLOR_TAILWIND = 'text-gray-400';
 
         // --- Funções Utilitárias ---
 
@@ -302,8 +303,7 @@
             clientName = '';
             projectDetails = '';
             pieces = [];
-            // Stock default de 600cm (6 metros)
-            stockMaterials = [{ id: Date.now() + Math.random(), length: 600, qty: 10, initialQty: 10 }];
+            stockMaterials = []; 
             sawKerf = 3; // mm
             cutPlan = null;
             editingPieceId = null;
@@ -311,6 +311,8 @@
 
             document.getElementById('clientNameInput').value = '';
             document.getElementById('projectDetailsInput').value = '';
+            document.getElementById('newStockQty').value = '';
+            document.getElementById('newPieceQty').value = '';
             document.getElementById('results').classList.add('hidden');
             renderStock();
             renderPieces();
@@ -328,7 +330,14 @@
                 clientName: clientName.trim(),
                 projectDetails: projectDetails.trim(),
                 sawKerf, // mm
-                pieces, // cm
+                // Garante que o campo 'selected' seja salvo
+                pieces: pieces.map(p => ({
+                    id: p.id,
+                    length: p.length,
+                    qty: p.qty,
+                    assemblyGroup: p.assemblyGroup,
+                    selected: p.selected !== undefined ? p.selected : true // Salva o status de seleção
+                })), 
                 // Salva o estoque original (para não perder o estado inicial se o corte for refeito)
                 stockMaterials: stockMaterials.map(s => ({ length: s.length, qty: s.initialQty })), // cm
                 timestamp: Date.now(),
@@ -355,7 +364,13 @@
             clientName = project.clientName || '';
             projectDetails = project.projectDetails || '';
             sawKerf = project.sawKerf || 3; // mm
-            pieces = project.pieces || []; // cm
+            
+            // Garante compatibilidade e status de seleção
+            pieces = (project.pieces || []).map(p => ({
+                ...p,
+                // Ensure 'selected' exists for backward compatibility (defaults to true)
+                selected: p.selected !== undefined ? p.selected : true 
+            })); 
             
             // Recria stockMaterials, garantindo IDs únicos para gerenciamento interno
             stockMaterials = (project.stockMaterials || []).map(s => ({
@@ -419,7 +434,7 @@
             });
         };
 
-        // --- Gerenciamento de Estoque, Peças e Otimização (Sem Alteração na Lógica Central) ---
+        // --- Gerenciamento de Estoque, Peças e Otimização ---
 
         const updateClientMetadata = () => {
             clientName = document.getElementById('clientNameInput').value;
@@ -434,8 +449,12 @@
             const qty = parseInt(qtyInput.value);
             sawKerf = parseFloat(document.getElementById('sawKerfInput').value);
             
-            if (isNaN(lengthCM) || lengthCM <= 0 || isNaN(qty) || qty <= 0) {
-                showCustomAlert('Comprimento e Quantidade de Estoque inválidos.', 'error');
+            if (isNaN(lengthCM) || lengthCM <= 0) {
+                showCustomAlert('Comprimento de Estoque inválido.', 'error');
+                return;
+            }
+            if (isNaN(qty) || qty <= 0) {
+                showCustomAlert('Quantidade de Estoque inválida.', 'error');
                 return;
             }
             if (isNaN(sawKerf) || sawKerf < 0) sawKerf = 3;
@@ -457,7 +476,7 @@
             }
 
             lengthInput.value = '';
-            qtyInput.value = '1';
+            qtyInput.value = ''; 
             
             renderStock();
         };
@@ -497,6 +516,19 @@
             });
         };
 
+        const togglePieceSelection = (id) => {
+            const pieceIndex = pieces.findIndex(p => p.id === id);
+            if (pieceIndex !== -1) {
+                // Inverte o estado de seleção
+                pieces[pieceIndex].selected = !pieces[pieceIndex].selected;
+                
+                // Redesenha para atualizar a linha e a contagem
+                renderPieces();
+
+                showCustomAlert(`Peça ${pieces[pieceIndex].length.toFixed(2)}cm ${pieces[pieceIndex].selected ? 'incluída' : 'excluída'} do cálculo.`, 'info');
+            }
+        };
+
         const savePiece = () => {
             const lengthInput = document.getElementById('newPieceLength');
             const qtyInput = document.getElementById('newPieceQty');
@@ -506,8 +538,12 @@
             const qty = parseInt(qtyInput.value);
             const assemblyGroup = groupInput.value.trim() || 'Geral';
 
-            if (isNaN(lengthCM) || lengthCM <= 0 || isNaN(qty) || qty <= 0) {
-                showCustomAlert('Comprimento e Quantidade de Peça inválidos.', 'error');
+            if (isNaN(lengthCM) || lengthCM <= 0) {
+                showCustomAlert('Comprimento da Peça inválido.', 'error');
+                return;
+            }
+            if (isNaN(qty) || qty <= 0) {
+                 showCustomAlert('Quantidade da Peça inválida.', 'error');
                 return;
             }
 
@@ -517,6 +553,7 @@
                 pieces[pieceIndex].length = lengthCM; // cm
                 pieces[pieceIndex].qty = qty;
                 pieces[pieceIndex].assemblyGroup = assemblyGroup;
+                // 'selected' é preservado
                 cancelEdit(); 
                 showCustomAlert('Peça atualizada!', 'info');
             } else {
@@ -525,9 +562,10 @@
                     length: lengthCM, // cm
                     qty,
                     assemblyGroup,
+                    selected: true, // Adiciona a propriedade 'selected' por padrão
                 });
                 lengthInput.value = '';
-                qtyInput.value = '1';
+                qtyInput.value = ''; 
                 groupInput.value = '';
                 showCustomAlert('Peça adicionada!', 'info');
             }
@@ -560,7 +598,7 @@
             editingPieceId = null;
             
             document.getElementById('newPieceLength').value = '';
-            document.getElementById('newPieceQty').value = '1';
+            document.getElementById('newPieceQty').value = ''; 
             document.getElementById('newPieceGroup').value = '';
             
             document.getElementById('addPieceButton').textContent = '+ Adicionar Peça';
@@ -569,18 +607,28 @@
         
         const renderPieces = () => {
             const piecesTableBody = document.getElementById('piecesTableBody');
-            const totalPieces = pieces.reduce((sum, p) => sum + p.qty, 0);
+            // Conta apenas as peças SELECIONADAS
+            const totalPiecesSelected = pieces.filter(p => p.selected).reduce((sum, p) => sum + p.qty, 0);
             
             piecesTableBody.innerHTML = '';
 
             if (pieces.length === 0) {
-                piecesTableBody.innerHTML = '<tr><td colspan="4" class="text-center py-4 text-gray-400">Nenhuma peça adicionada.</td></tr>';
+                // colspan 5
+                piecesTableBody.innerHTML = '<tr><td colspan="5" class="text-center py-4 text-gray-400">Nenhuma peça adicionada.</td></tr>';
             }
 
             pieces.forEach((p, index) => {
+                const checked = p.selected ? 'checked' : '';
+                // Estilo para indicar se a peça está excluída do cálculo
+                const rowClass = p.selected ? 'hover:bg-gray-700/50' : 'bg-gray-900/50 text-gray-500 line-through';
+                
                 const row = document.createElement('tr');
-                row.className = 'border-b border-gray-700 hover:bg-gray-700/50';
+                row.className = `border-b border-gray-700 ${rowClass}`;
                 row.innerHTML = `
+                    <!-- Coluna de Seleção -->
+                    <td class="px-4 py-2 text-sm text-center">
+                        <input type="checkbox" ${checked} onchange="window.togglePieceSelection(${p.id})" class="form-checkbox h-4 w-4 text-secondary rounded border-gray-600 bg-gray-700 focus:ring-secondary cursor-pointer">
+                    </td>
                     <td class="px-4 py-2 text-sm text-gray-200">${p.length.toFixed(2)} cm</td>
                     <td class="px-4 py-2 text-sm text-gray-200">${p.qty}</td>
                     <td class="px-4 py-2 text-sm text-gray-400">${p.assemblyGroup || 'Geral'}</td>
@@ -599,7 +647,8 @@
                 `;
                 piecesTableBody.appendChild(row);
             });
-            document.getElementById('totalPiecesCount').textContent = `Total de ${totalPieces} peças`;
+            // Atualiza a mensagem para peças SELECIONADAS
+            document.getElementById('totalPiecesCount').textContent = `Total de ${totalPiecesSelected} peças selecionadas`;
         };
         
         /**
@@ -650,8 +699,12 @@
 
 
         const calculatePlan = () => {
-            if (pieces.length === 0) {
-                showCustomAlert('Adicione peças para calcular.', 'error');
+            
+            // Filtra apenas as peças selecionadas
+            const selectedPieces = pieces.filter(p => p.selected);
+
+            if (selectedPieces.length === 0) {
+                showCustomAlert('Nenhuma peça está selecionada para cálculo.', 'error');
                 return;
             }
             if (stockMaterials.length === 0) {
@@ -667,7 +720,7 @@
             // Inicializa a contagem total de peças necessárias por tipo
             const initialPieceCount = new Map();
 
-            pieces.forEach((p, index) => {
+            selectedPieces.forEach((p, index) => { // Usa selectedPieces
                 const lengthMM = p.length * CM_TO_MM;
                 const lengthKey = p.length.toFixed(2);
                 
@@ -1008,7 +1061,7 @@
                         <div class="font-semibold text-gray-200">${(utilizedLengthMM * MM_TO_CM).toFixed(2)} cm</div>
                         
                         <div class="font-medium text-gray-400">Refugo total:</div>
-                        <div class="font-semibold text-amber-500">${cutPlan.totalWasteMM.toFixed(2)} mm</div>
+                        <div class="font-semibold ${REUSABLE_SCRAP_COLOR_TAILWIND}">${cutPlan.totalWasteMM.toFixed(2)} mm</div>
                         
                         <div class="font-medium text-gray-400">Total de Cortes:</div>
                         <div class="font-semibold text-gray-200">${cutPlan.detailedPlan.reduce((sum, sheet) => sum + sheet.cutsCount, 0)}</div>
@@ -1061,7 +1114,8 @@
                 
                 // 3. Renderiza a SOBRA FINAL (o que não foi reutilizado)
                 const wastePercent = (remainingLengthMM / initialLengthMM) * 100; 
-                const finalWasteColor = remainingLengthMM >= (cutPlan.sawKerf + 0.1) ? '#f59e0b' : '#44403c'; 
+                // **MODIFICADO: Usa a nova cor Gray-400 para refugo reutilizável**
+                const finalWasteColor = remainingLengthMM >= (cutPlan.sawKerf + 0.1) ? REUSABLE_SCRAP_COLOR_HEX : '#44403c'; 
                 const finalWasteText = remainingLengthMM >= (cutPlan.sawKerf + 0.1) ? 'Refugo Reutilizável' : 'Refugo Descartado';
                 
                 const wasteLengthCM = remainingLengthMM * MM_TO_CM;
@@ -1128,14 +1182,15 @@
                 }).join('');
                 
                 const wasteText = sheet.wasteMM > 0 ? 'Refugo Descartado (mm)' : sheet.generatedScrapLengthMM > 0 ? 'Retalho Gerado (mm)' : 'Consumido Totalmente';
-                const wasteColor = sheet.wasteMM > 0 ? 'text-red-400' : sheet.generatedScrapLengthMM > 0 ? 'text-amber-500' : 'text-secondary';
+                // **MODIFICADO: Usa a nova cor Tailwind para refugo reutilizável**
+                const wasteColor = sheet.wasteMM > 0 ? 'text-red-400' : sheet.generatedScrapLengthMM > 0 ? REUSABLE_SCRAP_COLOR_TAILWIND : 'text-secondary';
                 const wasteLengthMM = sheet.generatedScrapLengthMM > 0 ? sheet.generatedScrapLengthMM : sheet.wasteMM;
                 
                 const startTitle = sheet.isScrap 
                     ? `USO DE RETALHO (Gerado na Chapa ${sheet.sourceSheetId || sheet.id}) | `
                     : `INÍCIO DO PAINEL ${sheet.id} (${sheet.stockTypeCM.toFixed(2)}cm) | `;
 
-                return `<tr class="bg-gray-700"><td colspan="6" class="px-4 py-2 text-xs font-bold ${sheet.isScrap ? 'text-amber-500' : 'text-primary'}">${startTitle}<span class="${wasteColor}">SOBRA APÓS ESTES CORTES</span>: ${wasteLengthMM.toFixed(2)} ${wasteLengthMM > 0 ? 'mm' : ''} (${wasteText})</td></tr>${sheetCuts}`;
+                return `<tr class="bg-gray-700"><td colspan="6" class="px-4 py-2 text-xs font-bold ${sheet.isScrap ? REUSABLE_SCRAP_COLOR_TAILWIND : 'text-primary'}">${startTitle}<span class="${wasteColor}">SOBRA APÓS ESTES CORTES</span>: ${wasteLengthMM.toFixed(2)} ${wasteLengthMM > 0 ? 'mm' : ''} (${wasteText})</td></tr>${sheetCuts}`;
             }).join('');
 
 
@@ -1192,6 +1247,7 @@
         window.renderStock = renderStock;
         window.toggleCollapse = toggleCollapse; 
         window.highlightPieces = highlightPieces;
+        window.togglePieceSelection = togglePieceSelection; 
         
         // --- Inicialização ---
 
@@ -1276,7 +1332,8 @@
                         </div>
                         <div>
                             <label for="newStockQty" class="block text-sm font-medium text-gray-300">Qtd. (unid)</label>
-                            <input type="number" id="newStockQty" value="1" min="1" class="mt-1 block w-full rounded-md shadow-sm p-2 border dark-input focus:ring-primary focus:border-primary">
+                            <!-- MODIFICADO: Campo vazio -->
+                            <input type="number" id="newStockQty" value="" placeholder="1" min="1" class="mt-1 block w-full rounded-md shadow-sm p-2 border dark-input focus:ring-primary focus:border-primary">
                         </div>
                         <div>
                             <label for="sawKerfInput" class="block text-sm font-medium text-gray-300">Espessura da Serra (mm)</label>
@@ -1332,7 +1389,8 @@
                         </div>
                         <div>
                             <label for="newPieceQty" class="block text-sm font-medium text-gray-300">Qtd.</label>
-                            <input type="number" id="newPieceQty" value="1" min="1" class="mt-1 block w-full rounded-md shadow-sm p-2 border dark-input focus:ring-secondary focus:border-secondary">
+                             <!-- MODIFICADO: Campo vazio -->
+                            <input type="number" id="newPieceQty" value="" placeholder="1" min="1" class="mt-1 block w-full rounded-md shadow-sm p-2 border dark-input focus:ring-secondary focus:border-secondary">
                         </div>
                         <div class="col-span-2">
                             <label for="newPieceGroup" class="block text-sm font-medium text-gray-300">Grupo de Montagem (Opcional)</label>
@@ -1353,6 +1411,8 @@
                         <table class="min-w-full divide-y divide-gray-700">
                             <thead class="bg-gray-700">
                                 <tr>
+                                    <!-- NOVO: Coluna de Seleção -->
+                                    <th class="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase tracking-wider" title="Incluir no cálculo">Calc.</th>
                                     <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Comprimento (cm)</th>
                                     <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Qtd.</th>
                                     <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Grupo</th>
@@ -1364,6 +1424,7 @@
                             </tbody>
                         </table>
                     </div>
+                    <!-- MODIFICADO: A contagem agora reflete apenas as peças selecionadas -->
                     <p id="totalPiecesCount" class="text-right text-sm font-medium text-gray-400 mt-2"></p>
                 </div>
             </div>
