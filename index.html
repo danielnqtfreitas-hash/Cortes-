@@ -430,7 +430,7 @@
             try {
                 localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(updatedProjects));
                 projects = updatedProjects; // Atualiza o estado global
-                renderSavedProjects();
+                renderSavedProjects(); // Garante que a lista seja redesenhada após salvar/excluir
             } catch (error) {
                 console.error("Erro ao salvar projetos no localStorage:", error);
                 showCustomAlert('Erro ao salvar no armazenamento local.', 'error');
@@ -471,9 +471,13 @@
             
             // Garante que o input do sawKerf seja limpo para o padrão
             document.getElementById('sawKerfInput').value = sawKerf.toFixed(1); 
+            
+            // Garante que o estado de edição da peça seja cancelado
+            cancelEdit(); 
 
             renderStock();
             renderPieces();
+            renderSavedProjects(); // Garante que o destaque ATUAL seja removido da lista salva
             showCustomAlert('Novo projeto iniciado!', 'info');
         };
 
@@ -500,17 +504,18 @@
                 // Salva o estoque original (para não perder o estado inicial se o corte for refeito)
                 stockMaterials: stockMaterials.map(s => ({ 
                     length: s.length, 
-                    qty: s.initialQty,
+                    qty: s.initialQty, // Salva o initialQty como qty no objeto do projeto
                     selected: s.selected !== undefined ? s.selected : true, // Salva o status de seleção do estoque
                 })), // cm
                 timestamp: Date.now(),
             };
             
-            let updatedProjects = projects.filter(p => p.id !== projectData.id);
+            let updatedProjects = projects.filter(p => String(p.id) !== String(projectData.id)); // Usa String() para garantir a comparação
             updatedProjects.unshift(projectData); // Adiciona o projeto atual no início
             
             saveProjectsToLocal(updatedProjects);
             currentProjectId = projectData.id;
+
 
             // Garante que a lista de projetos esteja visível para confirmar o salvamento
             document.getElementById('savedProjectsContent').classList.add('expanded');
@@ -520,10 +525,11 @@
         };
 
         const loadProject = (projectId) => {
-            const project = projects.find(p => p.id === projectId);
+            // FIX: Converte p.id para string para comparação robusta com o projectId (string do DOM)
+            const project = projects.find(p => String(p.id) === String(projectId));
             if (!project) return;
             
-            currentProjectId = projectId;
+            currentProjectId = project.id; // Garante que o ID salvo seja usado
             clientName = project.clientName || '';
             projectDetails = project.projectDetails || '';
             sawKerf = project.sawKerf || 3; // mm
@@ -537,17 +543,18 @@
                     ...p,
                     selected: p.selected !== undefined ? p.selected : true 
                 };
-                // Preenche o mapa de cores com as cores salvas no projeto
-                pieceColorMap.set(piece.length.toFixed(2), piece.color || getPieceColor(piece.length));
+                // Preenche o mapa de cores com as cores salvas no projeto (ou gera uma nova)
+                piece.color = p.color || getPieceColor(piece.length);
+                pieceColorMap.set(piece.length.toFixed(2), piece.color);
                 return piece;
             }); 
             
             // Recria stockMaterials, garantindo IDs únicos para gerenciamento interno
             stockMaterials = (project.stockMaterials || []).map(s => ({
-                id: Date.now() + Math.random(),
+                id: Date.now() + Math.random() + s.length, // Unique ID por sessão
                 length: s.length, // cm
                 qty: s.qty,
-                initialQty: s.qty,
+                initialQty: s.qty, // Usamos o qty salvo como initialQty
                 selected: s.selected !== undefined ? s.selected : true, // Carrega o status de seleção
             }));
             
@@ -558,26 +565,47 @@
             
             document.getElementById('results').classList.add('hidden');
             highlightedPieceKey = null;
+            cancelEdit(); // Garante que o formulário de peças seja resetado
 
             renderStock(); // Renders stock table and updates kerf display
             renderPieces(); // Renders pieces table and updates count
+            
+            // FIX: Chama renderSavedProjects para atualizar o marcador (ATUAL)
+            renderSavedProjects(); 
             // -----------------------------------------------------------------
 
             showCustomAlert(`Projeto "${clientName}" carregado!`, 'success');
         };
 
         const deleteProject = (projectId) => {
-            if (!projectId) return;
+            if (!projectId) {
+                showCustomAlert('Nenhum projeto selecionado para exclusão.', 'error');
+                return;
+            }
+            
+            // FIX: Converte p.id para string para comparação robusta com o projectId (string do DOM)
+            const projectToDelete = projects.find(p => String(p.id) === String(projectId));
+            if (!projectToDelete) {
+                // Esta mensagem NÃO deve mais ser disparada se o ID for carregado corretamente
+                showCustomAlert('Erro ao encontrar projeto para exclusão.', 'error'); 
+                return;
+            }
 
-            const updatedProjects = projects.filter(p => p.id !== projectId);
-            saveProjectsToLocal(updatedProjects);
+            // Filtra o projeto excluído
+            const updatedProjects = projects.filter(p => String(p.id) !== String(projectId));
+            saveProjectsToLocal(updatedProjects); // Salva e redesenha a lista
 
-            if (currentProjectId === projectId) {
+            // Se o projeto ativo for excluído, inicia um novo e garante o reset do estado.
+            if (String(currentProjectId) === String(projectId)) {
+                // FIX: Usa newProject para redefinir completamente o estado atual
                 newProject(); 
             }
-            showCustomAlert('Projeto excluído localmente.', 'info');
+            
+            showCustomAlert(`Projeto "${projectToDelete.clientName}" excluído localmente.`, 'info');
         };
         
+        // A função deleteCurrentProject foi removida conforme solicitado no turno anterior
+
         const renderSavedProjects = () => {
             const listDiv = document.getElementById('savedProjectsList');
             listDiv.innerHTML = '';
@@ -589,12 +617,15 @@
 
             projects.forEach(p => {
                 const date = new Date(p.timestamp).toLocaleDateString();
-                
+                // Determina se este é o projeto atualmente carregado (Comparação de string)
+                const isCurrent = String(p.id) === String(currentProjectId);
+                const itemClass = isCurrent ? 'border-l-4 border-secondary shadow-lg' : 'border border-gray-600';
+
                 const item = document.createElement('div');
-                item.className = 'flex items-center justify-between p-3 bg-gray-700 rounded-lg mb-2 border border-gray-600';
+                item.className = `flex items-center justify-between p-3 bg-gray-700 rounded-lg mb-2 ${itemClass}`;
                 item.innerHTML = `
                     <div class="flex-1 min-w-0 mr-3">
-                        <p class="font-semibold text-white truncate">${p.clientName}</p>
+                        <p class="font-semibold text-white truncate">${p.clientName} ${isCurrent ? '<span class="text-secondary text-xs font-bold">(ATUAL)</span>' : ''}</p>
                         <p class="text-xs text-gray-400">${p.projectDetails || 'Sem detalhes'} | Salvo em ${date}</p>
                     </div>
                     <div class="flex space-x-2">
@@ -602,7 +633,7 @@
                         <button onclick="window.loadProject('${p.id}')" class="bg-primary hover:bg-blue-300 text-gray-900 text-xs px-3 py-1 rounded-full font-medium transition duration-150 shadow-md">
                             Abrir
                         </button>
-                        <button onclick="window.deleteProject('${p.id}')" class="bg-red-500 hover:bg-red-400 text-white text-xs px-3 py-1 rounded-full font-medium transition duration-150 shadow-md">
+                        <button onclick="window.deleteProject('${p.id}')" class="bg-red-500 hover:bg-red-400 text-white text-xs px-3 py-1 rounded-full font-medium transition duration-150 shadow-md" title="Excluir este projeto">
                             X
                         </button>
                     </div>
@@ -637,7 +668,8 @@
             
             const lengthCM = parseFloat(lengthInput.value);
             const qty = parseInt(qtyInput.value);
-            sawKerf = parseFloat(document.getElementById('sawKerfInput').value);
+            // Captura o kerf antes de adicionar o estoque
+            sawKerf = parseFloat(document.getElementById('sawKerfInput').value) || 3.0;
             
             if (isNaN(lengthCM) || lengthCM <= 0) {
                 showCustomAlert('Comprimento de Estoque inválido.', 'error');
@@ -649,7 +681,8 @@
             }
             if (isNaN(sawKerf) || sawKerf < 0) sawKerf = 3;
 
-            const existingStockIndex = stockMaterials.findIndex(s => s.length === lengthCM);
+            // Verifica se um estoque do MESMO COMPRIMENTO já existe.
+            const existingStockIndex = stockMaterials.findIndex(s => Math.abs(s.length - lengthCM) < 0.001);
             
             if (existingStockIndex !== -1) {
                 stockMaterials[existingStockIndex].qty += qty;
@@ -682,6 +715,9 @@
             const stockTableBody = document.getElementById('stockTableBody');
             stockTableBody.innerHTML = '';
             
+            // Captura o valor do input do kerf antes de renderizar
+            sawKerf = parseFloat(document.getElementById('sawKerfInput').value) || 3.0;
+
             document.getElementById('sawKerfInput').value = sawKerf.toFixed(1);
             document.getElementById('currentKerfDisplay').textContent = `${sawKerf.toFixed(1)} mm`;
             
@@ -1357,8 +1393,8 @@
 
                 return `
                     <div class="mb-6 p-4 border border-gray-700 rounded-lg bg-gray-700/50">
-                        <h3 class="font-semibold text-md mb-2 text-primary">
-                            ${sheetTitle}
+                        <h3 class="font-semibold text-md mb-2 ${sheet.isScrap ? 'text-gray-400' : 'text-primary'}">
+                            ${sheetTitle} ${sheet.isScrap ? '(USO DE RETALHO)' : '(NOVA)'}
                         </h3>
                         <div class="cut-bar bg-gray-900 border border-gray-600">
                             ${piecesHtml}
@@ -1416,6 +1452,11 @@
 
 
             resultsDiv.innerHTML = `
+                <div class="text-center mb-6">
+                    <button onclick="window.saveProject()" class="bg-tertiary text-gray-900 py-3 px-6 rounded-lg shadow-lg hover:bg-amber-600 transition duration-150 font-bold cta-pulse">
+                        SALVAR PLANO E PROJETO
+                    </button>
+                </div>
                 ${statsHtml}
 
                 <div class="bg-gray-800 rounded-xl shadow-2xl p-6 mb-8 border border-gray-700">
@@ -1503,15 +1544,13 @@
                 </div>
             </div>
 
-            <div class="grid grid-cols-3 gap-4">
-                <button onclick="window.saveProject()" class="col-span-3 sm:col-span-1 bg-tertiary text-gray-900 py-2 px-4 rounded-md shadow-lg hover:bg-amber-600 transition duration-150 font-semibold">
+            <!-- Botões atualizados para 1 coluna em mobile e 2 em desktop -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <button onclick="window.saveProject()" class="bg-tertiary text-gray-900 py-2 px-4 rounded-md shadow-lg hover:bg-amber-600 transition duration-150 font-semibold">
                     Salvar Projeto
                 </button>
-                <button onclick="window.newProject()" class="col-span-3 sm:col-span-1 bg-gray-600 text-white py-2 px-4 rounded-md shadow-lg hover:bg-gray-500 transition duration-150 font-semibold">
+                <button onclick="window.newProject()" class="bg-gray-600 text-white py-2 px-4 rounded-md shadow-lg hover:bg-gray-500 transition duration-150 font-semibold">
                     Novo Projeto
-                </button>
-                <button onclick="window.deleteProject(currentProjectId)" class="col-span-3 sm:col-span-1 bg-red-700 text-white py-2 px-4 rounded-md shadow-lg hover:bg-red-600 transition duration-150 font-semibold">
-                    Excluir Atual
                 </button>
             </div>
             
