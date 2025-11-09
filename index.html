@@ -142,8 +142,9 @@
         // Conteúdo mínimo do Service Worker (simulação de sw.js)
         const swContent = `
             const CACHE_NAME = 'corte-plan-v3';
+            // FIX: Alterado './' para '/' para melhor interceptação da requisição de navegação
             const urlsToCache = [
-                './', 
+                '/', 
                 'https://cdn.tailwindcss.com',
             ];
 
@@ -158,11 +159,26 @@
             });
 
             self.addEventListener('fetch', (event) => {
-                // Estratégia: Cache, depois fallback para Network
+                // Estratégia: Cache-First (tenta servir do cache, se falhar, vai para a rede)
                 event.respondWith(
-                    caches.match(event.request).then((response) => {
-                        return response || fetch(event.request);
-                    })
+                    caches.match(event.request)
+                        .then((response) => {
+                            if (response) {
+                                console.log('[SW] Servindo do cache:', event.request.url);
+                                return response;
+                            }
+                            // Se não estiver no cache, tenta a rede.
+                            console.log('[SW] Buscando na rede:', event.request.url);
+                            return fetch(event.request);
+                        })
+                        .catch(error => {
+                            // Erro de rede/offline. 
+                            console.error('[SW] Falha no Fetch:', error);
+                            // Retorna uma resposta de fallback, se disponível (por ex., para a página principal)
+                            if (event.request.mode === 'navigate') {
+                                return caches.match('/');
+                            }
+                        })
                 );
             });
 
@@ -239,6 +255,7 @@
         let sawKerf = 3;       // Guarda kerf em MM
         let cutPlan = null;    
         let editingPieceId = null; 
+        let editingStockId = null; // NOVO: ID do item de estoque em edição
         let highlightedPieceKey = null; // Chave (length CM string) da peça destacada
 
         // Mapa para garantir cores únicas por tamanho de peça
@@ -354,6 +371,35 @@
                 }
             }
         };
+        
+        // Função utilitária para expandir um acordeão
+        const expandCollapse = (targetId) => {
+            const content = document.getElementById(targetId);
+            const header = document.querySelector(`#${targetId.replace('Content', 'Header')}`);
+            if (!content.classList.contains('expanded')) {
+                // Garante que outros acordeões sejam fechados antes de expandir este
+                document.querySelectorAll('.collapsible-content.expanded').forEach(c => {
+                    c.classList.remove('expanded');
+                    document.querySelector(`#${c.id.replace('Content', 'Header')}`).classList.remove('expanded');
+                    c.style.maxHeight = '0';
+                    c.style.paddingTop = '0';
+                    c.style.paddingBottom = '0';
+                });
+                
+                content.classList.add('expanded');
+                header.classList.add('expanded');
+                content.style.maxHeight = '1000px'; 
+                
+                if (targetId === 'savedProjectsContent') {
+                    content.style.paddingTop = '0.5rem';
+                    content.style.paddingBottom = '1.5rem';
+                } else {
+                    content.style.paddingTop = '1.5rem';
+                    content.style.paddingBottom = '1.5rem';
+                }
+            }
+        };
+
 
         const showCustomAlert = (message, type = 'info') => {
             const alertBox = document.getElementById('customAlert');
@@ -460,6 +506,7 @@
             sawKerf = 3; // mm
             cutPlan = null;
             editingPieceId = null;
+            editingStockId = null;
             highlightedPieceKey = null;
             pieceColorMap.clear(); // Limpa o mapa de cores para novo projeto
 
@@ -474,6 +521,7 @@
             
             // Garante que o estado de edição da peça seja cancelado
             cancelEdit(); 
+            cancelStockEdit(); // Cancela edição de estoque
 
             renderStock();
             renderPieces();
@@ -521,7 +569,7 @@
             document.getElementById('savedProjectsContent').classList.add('expanded');
             document.getElementById('savedProjectsHeader').classList.add('expanded');
 
-            showCustomAlert(`Projeto "${clientName}" salvo localmente!`, 'success');
+            showCustomAlert(`Projeto "${clientName}" salvo!`, 'success');
         };
 
         const loadProject = (projectId) => {
@@ -566,10 +614,14 @@
             document.getElementById('results').classList.add('hidden');
             highlightedPieceKey = null;
             cancelEdit(); // Garante que o formulário de peças seja resetado
+            cancelStockEdit(); // NOVO: Cancela edição de estoque
 
             renderStock(); // Renders stock table and updates kerf display
             renderPieces(); // Renders pieces table and updates count
             
+            // NOVO: Expande a seção de peças automaticamente
+            expandCollapse('piecesContent'); 
+
             // FIX: Chama renderSavedProjects para atualizar o marcador (ATUAL)
             renderSavedProjects(); 
             // -----------------------------------------------------------------
@@ -601,7 +653,7 @@
                 newProject(); 
             }
             
-            showCustomAlert(`Projeto "${projectToDelete.clientName}" excluído localmente.`, 'info');
+            showCustomAlert(`Projeto "${projectToDelete.clientName}" excluído.`, 'info');
         };
         
         // A função deleteCurrentProject foi removida conforme solicitado no turno anterior
@@ -642,12 +694,80 @@
             });
         };
 
-        // --- Gerenciamento de Estoque, Peças e Otimização ---
+        // --- Gerenciamento de Estoque ---
 
         const updateClientMetadata = () => {
             clientName = document.getElementById('clientNameInput').value;
             projectDetails = document.getElementById('projectDetailsInput').value;
         };
+        
+        // NOVO: Função para iniciar a edição de estoque
+        const startEditStock = (id) => {
+            const stockToEdit = stockMaterials.find(s => s.id === id);
+            if (!stockToEdit) return;
+
+            document.getElementById('newStockLength').value = stockToEdit.length;
+            document.getElementById('newStockQty').value = stockToEdit.initialQty;
+
+            editingStockId = id;
+            
+            document.getElementById('addStockButton').textContent = 'Salvar Alterações';
+            document.getElementById('cancelStockEditButton').classList.remove('hidden');
+            document.getElementById('newStockLength').focus();
+        };
+
+        // NOVO: Função para salvar as edições de estoque
+        const saveStockEdit = () => {
+            const stockIndex = stockMaterials.findIndex(s => s.id === editingStockId);
+
+            if (stockIndex === -1) {
+                // Se estivermos editando mas o item não for encontrado, faz a adição normal
+                addOrUpdateStock();
+                return;
+            }
+            
+            const lengthCM = parseFloat(document.getElementById('newStockLength').value);
+            const qty = parseInt(document.getElementById('newStockQty').value);
+
+            if (isNaN(lengthCM) || lengthCM <= 0) {
+                showCustomAlert('Comprimento de Estoque inválido.', 'error');
+                return;
+            }
+            if (isNaN(qty) || qty <= 0) {
+                showCustomAlert('Quantidade de Estoque inválida.', 'error');
+                return;
+            }
+
+            // Verifica se o novo comprimento já existe em OUTRO item (para evitar duplicidade)
+            const duplicateIndex = stockMaterials.findIndex(s => 
+                Math.abs(s.length - lengthCM) < 0.001 && s.id !== editingStockId
+            );
+            
+            if (duplicateIndex !== -1) {
+                showCustomAlert('Este comprimento já existe em outra linha de estoque. Adicione a quantidade a essa linha.', 'error');
+                return;
+            }
+
+            // Atualiza o item de estoque
+            stockMaterials[stockIndex].length = lengthCM;
+            stockMaterials[stockIndex].qty = qty;
+            stockMaterials[stockIndex].initialQty = qty;
+
+            cancelStockEdit();
+            renderStock();
+            showCustomAlert('Estoque atualizado!', 'info');
+        };
+        
+        // NOVO: Função para cancelar a edição de estoque
+        const cancelStockEdit = () => {
+            editingStockId = null;
+            document.getElementById('newStockLength').value = '';
+            document.getElementById('newStockQty').value = ''; 
+            
+            document.getElementById('addStockButton').textContent = '+ Adicionar Mat.';
+            document.getElementById('cancelStockEditButton').classList.add('hidden');
+        };
+
 
         const toggleStockSelection = (id) => {
             const stockIndex = stockMaterials.findIndex(s => s.id === id);
@@ -680,6 +800,12 @@
                 return;
             }
             if (isNaN(sawKerf) || sawKerf < 0) sawKerf = 3;
+            
+            // Se estiver em modo de edição, salva a edição em vez de adicionar
+            if (editingStockId !== null) {
+                saveStockEdit();
+                return;
+            }
 
             // Verifica se um estoque do MESMO COMPRIMENTO já existe.
             const existingStockIndex = stockMaterials.findIndex(s => Math.abs(s.length - lengthCM) < 0.001);
@@ -721,9 +847,9 @@
             document.getElementById('sawKerfInput').value = sawKerf.toFixed(1);
             document.getElementById('currentKerfDisplay').textContent = `${sawKerf.toFixed(1)} mm`;
             
-            // Colspan alterado para 4 devido à nova coluna de seleção
+            // Colspan alterado para 5 devido à nova coluna de edição
             if (stockMaterials.length === 0) {
-                stockTableBody.innerHTML = '<tr><td colspan="4" class="text-center py-4 text-gray-400">Nenhum estoque adicionado.</td></tr>';
+                stockTableBody.innerHTML = '<tr><td colspan="5" class="text-center py-4 text-gray-400">Nenhum estoque adicionado.</td></tr>';
             }
 
             stockMaterials.forEach(s => {
@@ -739,9 +865,15 @@
                     </td>
                     <td class="px-4 py-2 text-sm text-gray-200">${s.length.toFixed(2)} cm</td>
                     <td class="px-4 py-2 text-sm text-gray-200">${s.initialQty}</td>
-                    <td class="px-4 py-2 text-sm text-center">
-                        <button onclick="window.removeStock(${s.id})" class="text-red-500 hover:text-red-400 focus:outline-none" title="Remover Estoque">
-                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mx-auto" viewBox="0 0 20 20" fill="currentColor">
+                    <!-- Coluna de Ação (Editar e Remover) -->
+                    <td class="px-4 py-2 text-sm text-center flex justify-center space-x-1">
+                        <button onclick="window.startEditStock(${s.id})" class="text-tertiary hover:text-amber-400 focus:outline-none p-1" title="Editar Estoque">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zm-3.109 4.316l2.828 2.828-8.86 8.86H4v-2.828l8.86-8.86z" />
+                            </svg>
+                        </button>
+                        <button onclick="window.removeStock(${s.id})" class="text-red-500 hover:text-red-400 focus:outline-none p-1" title="Remover Estoque">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
                                 <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm4 0a1 1 0 10-2 0v6a1 1 0 102 0V8z" clip-rule="evenodd" />
                             </svg>
                         </button>
@@ -1251,7 +1383,7 @@
             cutPlan = {
                 plan: mergedPlan, 
                 detailedPlan: detailedPlan, 
-                // Usa originalStockMM (apenas os selecionados/usados)
+                // Usa originalStockMM (apenas os seleccionados/usados)
                 stockUsage: originalStockMM.map(s => ({ ...s, lengthCM: s.length * MM_TO_CM })), 
                 sawKerf,
                 totalLengthOfPiecesCM: totalLengthOfPiecesMM * MM_TO_CM,
@@ -1387,14 +1519,14 @@
                     `;
                 }
 
-
+                // REMOVIDO: A informação extra (NOVA)
                 const sheetTitle = `Chapa ${sheet.id}`;
                 
 
                 return `
                     <div class="mb-6 p-4 border border-gray-700 rounded-lg bg-gray-700/50">
                         <h3 class="font-semibold text-md mb-2 ${sheet.isScrap ? 'text-gray-400' : 'text-primary'}">
-                            ${sheetTitle} ${sheet.isScrap ? '(USO DE RETALHO)' : '(NOVA)'}
+                            ${sheetTitle} ${sheet.isScrap ? '(USO DE RETALHO)' : ''}
                         </h3>
                         <div class="cut-bar bg-gray-900 border border-gray-600">
                             ${piecesHtml}
@@ -1499,6 +1631,9 @@
         window.deleteProject = deleteProject;
         window.newProject = newProject;
         window.removeStock = removeStock;
+        window.startEditStock = startEditStock; // NOVO
+        window.saveStockEdit = saveStockEdit; // NOVO
+        window.cancelStockEdit = cancelStockEdit; // NOVO
         window.startEdit = startEdit;
         window.removePiece = removePiece;
         window.calculatePlan = calculatePlan;
@@ -1508,6 +1643,7 @@
         window.cancelEdit = cancelEdit;
         window.renderStock = renderStock;
         window.toggleCollapse = toggleCollapse; 
+        window.expandCollapse = expandCollapse; // NOVO
         window.highlightPieces = highlightPieces;
         window.togglePieceSelection = togglePieceSelection; 
         window.toggleStockSelection = toggleStockSelection;
@@ -1556,7 +1692,7 @@
             
             <!-- Projetos Salvos (Acordeão) -->
             <div id="savedProjectsHeader" onclick="window.toggleCollapse('savedProjectsContent')" class="collapsible-header cursor-pointer mt-6 border-t border-gray-700 pt-4 flex justify-between items-center hover:bg-gray-700/70 rounded-md transition duration-150">
-                <h3 class="font-bold text-gray-200">Projetos Salvos Localmente</h3>
+                <h3 class="font-bold text-gray-200">Projetos Salvos</h3>
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-400 transform transition-transform duration-300" viewBox="0 0 20 20" fill="currentColor">
                     <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />
                 </svg>
@@ -1601,9 +1737,12 @@
                             <input type="number" id="sawKerfInput" value="3.0" step="0.5" onchange="window.renderStock()" class="mt-1 block w-full rounded-md shadow-sm p-2 border dark-input focus:ring-primary focus:border-primary">
                             <p class="text-xs text-gray-400 mt-1">Atual: <span id="currentKerfDisplay" class="font-semibold">3.0 mm</span></p>
                         </div>
-                        <div class="col-span-1 sm:col-span-1 flex items-end">
-                            <button onclick="window.addOrUpdateStock()" class="w-full bg-primary text-gray-900 py-2 px-4 rounded-md shadow-md hover:bg-blue-300 transition duration-150 font-semibold text-sm sm:text-base">
+                        <div class="col-span-1 sm:col-span-1 flex flex-col justify-end space-y-2">
+                            <button id="addStockButton" onclick="window.addOrUpdateStock()" class="w-full bg-primary text-gray-900 py-2 px-4 rounded-md shadow-md hover:bg-blue-300 transition duration-150 font-semibold text-sm sm:text-base">
                                 + Adicionar Mat.
+                            </button>
+                            <button id="cancelStockEditButton" onclick="window.cancelStockEdit()" class="hidden w-full bg-gray-600 text-white py-1 px-4 text-xs rounded-md shadow-md hover:bg-gray-500 transition duration-150 font-medium">
+                                Cancelar Edição
                             </button>
                         </div>
                     </div>
@@ -1613,11 +1752,11 @@
                         <table class="min-w-full divide-y divide-gray-700">
                             <thead class="bg-gray-700">
                                 <tr>
-                                    <!-- Coluna de Seleção de Estoque -->
+                                    <!-- Colspan alterado para 5: Calc, Comp, Qtd, Ações -->
                                     <th class="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase tracking-wider" title="Incluir no cálculo">Calc.</th>
                                     <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Comprimento (cm)</th>
                                     <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Qtd. Inicial</th>
-                                    <th class="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase tracking-wider">Ação</th>
+                                    <th class="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase tracking-wider">Ações</th>
                                 </tr>
                             </thead>
                             <tbody id="stockTableBody" class="bg-gray-800 divide-y divide-gray-700">
